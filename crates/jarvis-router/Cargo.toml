@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 jarvis-actions = { path = "../jarvis-actions" }
+jarvis-config = { path = "../jarvis-config" }
 
 [lints]
 workspace = true

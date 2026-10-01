@@ -2,11 +2,13 @@
 
 //! Windows integration boundary.
 //!
-//! The current implementation is intentionally an in-memory lifecycle adapter
-//! for deterministic tests. It does not enumerate processes, create Job
-//! Objects, change priority, or affect any Windows component.
+//! The in-memory lifecycle adapter supports deterministic policy tests. The
+//! `WindowsJobObjectProbe` checks the reviewed Win32 containment primitive,
+//! but is not a worker lifecycle or a resident supervisor. It deliberately
+//! cannot launch or adopt any process.
 
 use jarvis_core::ProfileGeneration;
+use jarvis_windows_ffi::{KillOnCloseJob, Win32Error};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerId(String);
@@ -31,7 +33,13 @@ pub enum WorkerKind {
     Llm,
     Tts,
     Learning,
+    Embedding,
+    Build,
+    Sandbox,
     Extension,
+    Broker,
+    Script,
+    Ui,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,9 +74,9 @@ pub trait WorkerLifecycle {
     fn owned_workers(&self) -> &[OwnedWorker];
 }
 
-/// A controlled fake used until the real Job Object adapter is built. An
-/// unresponsive worker remains visible in the shutdown report, which lets
-/// callers test restricted-fault behavior without killing a process.
+/// A controlled test double. An unresponsive worker remains visible in the
+/// shutdown report, which lets callers test restricted-fault behavior without
+/// killing a process.
 #[derive(Debug, Default)]
 pub struct InMemoryWorkerLifecycle {
     workers: Vec<OwnedWorker>,
@@ -123,6 +131,30 @@ impl WorkerLifecycle for InMemoryWorkerLifecycle {
     }
 }
 
+/// A short-lived capability probe for the reviewed Jarvis Job Object primitive.
+///
+/// The unnamed Job Object and its raw handle remain opaque. This type does not
+/// track workers, participate in a competitive transition, or expose process
+/// launch/assignment APIs. A future long-lived supervisor must implement the
+/// fixed suspended-create, assign, verify, resume sequence separately before
+/// any Jarvis worker is allowed to run.
+#[derive(Debug)]
+pub struct WindowsJobObjectProbe {
+    job: KillOnCloseJob,
+}
+
+impl WindowsJobObjectProbe {
+    pub fn create() -> Result<Self, Win32Error> {
+        Ok(Self {
+            job: KillOnCloseJob::create()?,
+        })
+    }
+
+    pub fn active_process_count(&self) -> Result<u32, Win32Error> {
+        self.job.active_process_count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +166,16 @@ mod tests {
         lifecycle.mark_unresponsive("voice-1");
         let report = lifecycle.shutdown_owned_workers(ProfileGeneration::initial());
         assert_eq!(report.remaining_workers, vec![WorkerId::new("voice-1")]);
+    }
+
+    #[test]
+    fn native_job_probe_verifies_an_empty_job() {
+        let lifecycle = WindowsJobObjectProbe::create().expect("create empty Job Object");
+        assert_eq!(
+            lifecycle
+                .active_process_count()
+                .expect("query empty Job Object"),
+            0
+        );
     }
 }

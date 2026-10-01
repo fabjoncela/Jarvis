@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use jarvis_actions::{Action, ActionPlan};
+use jarvis_config::ApplicationCatalog;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RouteResult {
@@ -21,14 +22,16 @@ pub struct Router {
 
 impl Router {
     #[must_use]
-    pub fn starter_router() -> Self {
+    pub fn from_catalog(catalog: &ApplicationCatalog) -> Self {
         let mut aliases = BTreeMap::new();
-        aliases.insert(
-            "open discord".to_owned(),
-            Action::LaunchApplication {
-                application_id: "discord".to_owned(),
-            },
-        );
+        for (alias, application_id) in catalog.launch_aliases() {
+            aliases.insert(
+                format!("open {alias}"),
+                Action::LaunchApplication {
+                    application_id: application_id.to_owned(),
+                },
+            );
+        }
         Self { aliases }
     }
 
@@ -73,9 +76,17 @@ pub fn normalize(utterance: &str) -> String {
 mod tests {
     use super::*;
 
+    fn router() -> Router {
+        let configuration = jarvis_config::ValidatedConfiguration::load_from_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config"),
+        )
+        .expect("checked-in config must validate");
+        Router::from_catalog(configuration.applications())
+    }
+
     #[test]
     fn known_alias_routes_without_a_model() {
-        let router = Router::starter_router();
+        let router = router();
         assert!(matches!(
             router.route("Jarvis,   OPEN Discord"),
             RouteResult::Plan(_)
@@ -84,7 +95,7 @@ mod tests {
 
     #[test]
     fn invalid_typed_pattern_does_not_become_a_plan() {
-        let router = Router::starter_router();
+        let router = router();
         assert!(matches!(
             router.route("set volume to 101"),
             RouteResult::InvalidPattern { .. }

@@ -3,11 +3,13 @@ members = [
     "apps/jarvis",
     "apps/session-worker",
     "crates/jarvis-actions",
+    "crates/jarvis-config",
     "crates/jarvis-core",
     "crates/jarvis-gaming",
     "crates/jarvis-profiles",
     "crates/jarvis-router",
     "crates/jarvis-windows",
+    "crates/jarvis-windows-ffi",
 ]
 default-members = ["apps/jarvis", "apps/session-worker"]
 resolver = "2"
@@ -20,8 +22,10 @@ license = "UNLICENSED"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+undocumented_unsafe_blocks = "deny"

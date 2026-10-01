@@ -1,16 +1,21 @@
 # Jarvis
 
 Jarvis is an offline-first Windows desktop assistant written primarily in Rust.
-Its first implemented milestone is a safe, side-effect-free V1 foundation:
+Its current V1 foundation is non-executing:
 
-- a supervisor-owned profile and generation gate;
+- a profile/generation safety model, exercised through unit tests;
+- strict, all-or-nothing TOML configuration validation;
 - typed, allowlisted action plans;
 - deterministic alias and volume-pattern routing;
-- competitive-mode containment logic with a testable worker-lifecycle boundary.
+- competitive-mode policy logic with testable in-memory worker lifecycles;
+- an ephemeral Windows Job Object capability check for future Jarvis-owned
+  workers.
 
 No microphone capture, model loading, game interaction, Windows process control,
-or desktop automation is active in this scaffold. The executable only validates
-and displays plans; it cannot execute them.
+or desktop automation is active in this scaffold. There is no resident
+supervisor, CS2/FACEIT monitor, worker creation/assignment, or real-process
+containment. The Job Object used by its self-check is empty and short-lived;
+the executable only validates and displays plans, and cannot execute them.
 
 ## Project status
 
@@ -35,6 +40,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p jarvis -- --self-check
 cargo run -p jarvis -- --route "Jarvis, open Discord"
 ```
+
+`--self-check` validates the fixed configuration bundle and creates an empty,
+unnamed Jarvis Job Object as an ephemeral capability check. It does not start a
+supervisor, monitor a game or FACEIT, or contain a worker. FACEIT identity
+verification is not yet implemented; this is not a compatibility certification.
 
 Runtime data will eventually live under `%LOCALAPPDATA%\Jarvis`, never in the
 repository. Model files, recordings, credentials, and live databases must not

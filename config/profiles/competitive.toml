@@ -1,3 +1,5 @@
+# Future supervisor/event-monitor policy. These settings are validated now but
+# do not start a resident service or monitor in the current executable.
 id = "competitive"
 display_name = "Competitive Mode"
 overrides = ["god-mode"]

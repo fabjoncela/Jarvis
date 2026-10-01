@@ -1,4 +1,5 @@
-# Source-controlled defaults. No executable has configuration loading yet.
+# Source-controlled defaults. The validation CLI loads this bundle, but it does
+# not start a resident supervisor, monitor, or action executor.
 [general]
 default_profile = "god-mode"
 offline_first = true

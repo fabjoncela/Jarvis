@@ -7,9 +7,11 @@ license.workspace = true
 
 [dependencies]
 jarvis-actions = { path = "../../crates/jarvis-actions" }
+jarvis-config = { path = "../../crates/jarvis-config" }
 jarvis-core = { path = "../../crates/jarvis-core" }
 jarvis-profiles = { path = "../../crates/jarvis-profiles" }
 jarvis-router = { path = "../../crates/jarvis-router" }
+jarvis-windows = { path = "../../crates/jarvis-windows" }
 
 [lints]
 workspace = true

@@ -78,11 +78,6 @@ impl ActionRegistry {
         }
     }
 
-    #[must_use]
-    pub fn starter_registry() -> Self {
-        Self::new(["discord", "cs2"], ["cs2"])
-    }
-
     pub fn validate(
         &self,
         plan: ActionPlan,
@@ -233,7 +228,7 @@ mod tests {
 
     #[test]
     fn protected_game_cannot_be_a_close_target() {
-        let registry = ActionRegistry::starter_registry();
+        let registry = ActionRegistry::new(["discord", "cs2"], ["cs2"]);
         let profile = ProfileController::new();
         let result = registry.validate(
             ActionPlan::single(Action::CloseApplication {
@@ -250,7 +245,7 @@ mod tests {
 
     #[test]
     fn validated_request_is_rejected_after_generation_change() {
-        let registry = ActionRegistry::starter_registry();
+        let registry = ActionRegistry::new(["discord", "cs2"], ["cs2"]);
         let mut profile = ProfileController::new();
         let old_request = request(&profile);
         profile.enter_competitive(TransitionCause::Cs2Process);
