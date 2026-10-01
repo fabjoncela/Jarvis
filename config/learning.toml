@@ -1,0 +1,13 @@
+[learning]
+enabled_profiles = ["god-mode"]
+source = "authorized_actions_and_allowed_events"
+prefer_skills_before_llm = true
+auto_generate_recipe_candidates = true
+auto_activate_generated_code = false
+
+[promotion]
+low_risk_recipe_min_verified_live_successes = 3
+require_static_checks = true
+require_fixture_tests = true
+require_independent_verifier = true
+expanded_permissions_require_grant = true

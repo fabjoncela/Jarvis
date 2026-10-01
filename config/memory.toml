@@ -1,0 +1,12 @@
+[session]
+max_records = 100
+max_bytes = 262144
+ttl_seconds = 1800
+persist_transcripts = false
+
+[durable]
+store = "jarvis.db"
+explicit_preferences = true
+explicit_corrections = true
+inferred_preferences_stage = "v2"
+credentials_as_references_only = true

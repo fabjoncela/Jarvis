@@ -1,0 +1,35 @@
+id = "competitive"
+display_name = "Competitive Mode"
+overrides = ["god-mode"]
+
+[activation]
+manual_entry = true
+automatic_entry = true
+trigger_logic = "any"
+# This name is a normal process-lifecycle trigger only; no game inspection occurs.
+process_names = ["cs2.exe"]
+require_verified_faceit_setup = true
+exit_cooldown_seconds = 5
+detection_failure_policy = "restricted"
+
+[shutdown]
+terminate_all_nonessential_owned_workers = true
+close_microphone = true
+cancel_tts = true
+unregister_command_hotkeys = true
+deny_worker_restart = true
+deny_general_actions = true
+deny_scripts_and_extensions = true
+deny_learning_and_memory_maintenance = true
+deny_embedding_generation_and_retrieval = true
+deny_codegen_compilation_and_sandbox = true
+grace_period_milliseconds = 1000
+verify_process_exit = true
+
+[resident]
+supervisor = true
+event_monitor = true
+minimal_tray = true
+priority = "below_normal"
+gpu_inference_allowed = false
+continuous_telemetry = false

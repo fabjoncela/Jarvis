@@ -1,0 +1,13 @@
+[package]
+name = "jarvis-actions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jarvis-core = { path = "../jarvis-core" }
+jarvis-profiles = { path = "../jarvis-profiles" }
+
+[lints]
+workspace = true

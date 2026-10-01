@@ -1,0 +1,13 @@
+[package]
+name = "jarvis-session-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jarvis-core = { path = "../../crates/jarvis-core" }
+jarvis-profiles = { path = "../../crates/jarvis-profiles" }
+
+[lints]
+workspace = true

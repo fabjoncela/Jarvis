@@ -1,0 +1,16 @@
+# Source-controlled defaults. No executable has configuration loading yet.
+[general]
+default_profile = "god-mode"
+offline_first = true
+run_as_administrator = false
+raw_audio_persistence = false
+
+[activation]
+wake_word = "jarvis"
+push_to_talk = "Ctrl+Space"
+emergency_stop = "Ctrl+Shift+Pause"
+
+[storage]
+database = "%LOCALAPPDATA%/Jarvis/jarvis.db"
+recipe_directory = "%LOCALAPPDATA%/Jarvis/learned_commands"
+log_retention_days = 7

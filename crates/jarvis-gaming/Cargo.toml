@@ -1,0 +1,13 @@
+[package]
+name = "jarvis-gaming"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jarvis-profiles = { path = "../jarvis-profiles" }
+jarvis-windows = { path = "../jarvis-windows" }
+
+[lints]
+workspace = true

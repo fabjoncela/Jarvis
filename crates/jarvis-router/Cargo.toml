@@ -1,0 +1,12 @@
+[package]
+name = "jarvis-router"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jarvis-actions = { path = "../jarvis-actions" }
+
+[lints]
+workspace = true

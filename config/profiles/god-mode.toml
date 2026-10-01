@@ -1,0 +1,18 @@
+id = "god-mode"
+display_name = "God Mode"
+
+[voice]
+enabled = true
+transcribe_only_after_activation = true
+max_utterance_seconds = 10
+
+[ai]
+enabled = true
+spawn_on_unknown_command = true
+idle_timeout_seconds = 60
+arbitrary_shell = false
+
+[security]
+dangerous_actions_require_confirmation = true
+confirmation_expiry_seconds = 10
+revalidate_recipes_on_every_use = true

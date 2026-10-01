@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "apps/jarvis",
+    "apps/session-worker",
+    "crates/jarvis-actions",
+    "crates/jarvis-core",
+    "crates/jarvis-gaming",
+    "crates/jarvis-profiles",
+    "crates/jarvis-router",
+    "crates/jarvis-windows",
+]
+default-members = ["apps/jarvis", "apps/session-worker"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+version = "0.1.0"
+license = "UNLICENSED"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

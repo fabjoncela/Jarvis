@@ -1,0 +1,11 @@
+# These are identifiers only. No application is launched by the current scaffold.
+[apps.cs2]
+type = "steam"
+appid = 730
+aliases = ["cs", "cs2", "counter", "counter strike", "counter strike 2"]
+protected_from_cleanup = true
+
+[apps.discord]
+type = "configured_executable"
+path_id = "verified_discord_install"
+aliases = ["discord", "dc"]

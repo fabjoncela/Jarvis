@@ -1,0 +1,7 @@
+[cleanup]
+enabled = false
+policy = "explicit_targets_only"
+protect_windows_security_and_game_dependencies = true
+
+# Add a target only after its identity, user ownership, graceful-close behavior,
+# and restoration policy have been verified. The default deliberately has none.
