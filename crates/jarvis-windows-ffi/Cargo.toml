@@ -21,6 +21,12 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+windows = { version = "0.61.3", default-features = false, features = [
+    "Win32_System_Com",
+    "Win32_System_Rpc",
+    "Win32_Security",
+    "Win32_System_Wmi",
+] }
 
 [lints.rust]
 # This is the sole reviewed raw-Win32 FFI leaf. Every other crate inherits the

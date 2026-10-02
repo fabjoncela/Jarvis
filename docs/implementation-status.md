@@ -52,33 +52,61 @@ pre-match launch sequence, not a running desktop assistant:
     check for the fixed FACEIT Anti-Cheat Launcher and registered service,
     Chrome, Steam, and app 730. It does not start any component and is not a
     compatibility certification or reusable execution grant.
-13. `--monitor-competitive` performs startup reconciliation, then polls fixed
-    process/service snapshots every 500 ms. It rechecks signed setup identities
-    every 30 seconds (every 5 seconds when unverified), closes both gates on an
-    active trigger or unhealthy observation, and restores God Mode only from a
-    healthy snapshot with no active triggers. `--detection-self-check` runs one
-    reconciliation cycle and exits. For the current Windows account, the
-    monitor owns one exclusive, owner-only local named pipe with a fixed
-    protocol (`STATUS`, `PREPARE_FACEIT_CS2`, and `WORKER_SELF_CHECK`). It
-    rejects remote clients and validates the connected client's executable
-    path. The handoff and worker-start CLI commands require this authority and
-    are serialized on the same owner; they fail closed if it is absent or its
-    policy gates are closed. `--supervisor-status` queries its latest
-    reconciled status. Optional `--diagnostics` flags report monotonic polling,
-    reconciliation, handler, and client round-trip durations; diagnostics are
-    off by default and do not change policy. Other Windows accounts are
+13. `--monitor-competitive` attempts fixed-scope process/service lifecycle
+    notifications before its startup snapshot when setup identities verify.
+    Notification payloads are opaque hints only; each hint triggers a new
+    complete identity-verified snapshot. The independent 500 ms snapshot
+    watchdog remains authoritative and is not postponed by event bursts.
+    Subscription setup/runtime failure falls back to that poller; neither
+    elevation nor WMI permission changes are attempted. Setup identities are
+    rechecked every 30 seconds (every 5 seconds when unverified), both gates
+    close on an active trigger or unhealthy observation, and God Mode restores
+    only from a healthy all-clear snapshot after the configured cooldown.
+    `--detection-self-check` runs one reconciliation cycle and exits. For the
+    current Windows account, the monitor owns one exclusive, owner-only local
+    named pipe with a fixed protocol (`STATUS`, `PREPARE_FACEIT_CS2`,
+    `WORKER_SELF_CHECK`, `REMEMBER_PREFERRED_APP`, and `SHOW_PREFERRED_APP`).
+    It rejects remote clients and validates the connected
+    client's executable path. Handoff and worker-start CLI commands require
+    this authority and are serialized on the same owner; they fail closed if it
+    is absent or its policy gates are closed. `--supervisor-status` queries its
+    latest reconciled status. Optional `--diagnostics` flags report polling,
+    lifecycle-reconcile, handler, and client round-trip durations; diagnostics
+    are off by default and do not change policy. Other Windows accounts are
     unsupported by this endpoint.
+14. `jarvis-storage` provides numbered, checksummed, transactional SQLite
+    migrations for explicit typed preference/correction records under
+    `%LOCALAPPDATA%\Jarvis\jarvis.db`. Records are parameterized, idempotent
+    by event ID, bounded to 128-byte identifiers and 8,192 rows, and contain
+    no transcript-specific column. The supervisor opens storage lazily for a
+    synchronous write only after stable God Mode gates and an expected profile
+    generation are confirmed, then drops the connection. The explicit
+    `--remember-preferred-app chrome|discord` command asks for `SAVE`, then
+    sends a bounded fixed-key request to the resident supervisor;
+    `--show-preferred-app` reads it. This value is informational only and never
+    changes a route or launch. There is no database I/O during startup or
+    Competitive Mode, and the session worker has no storage dependency.
+    Tests use isolated temporary roots.
+15. `jarvis-verification` introduces a typed separation between dispatch,
+    exact execution-anchored user feedback, and trusted machine outcomes.
+    No public caller can construct trusted machine observations yet. It is
+    not wired to OS observation or live action execution.
 
 ## Explicitly not implemented
 
 - any worker capability beyond
   the fixed session worker's cooperative exit event
-- an installed Windows service, automatic startup, or native OS process/service event subscriptions
-- process monitoring faster than the 500 ms poll interval
+- an installed Windows service or automatic startup
+- native lifecycle notifications available on every Windows token; the current
+  local self-check received WMI access denied, so this workstation must use the
+  authoritative 500 ms identity-snapshot fallback unless access is later
+  deliberately changed. This is not a reason to elevate or weaken permissions
+  automatically.
 - general desktop application, audio, browser, file, service, or system action
   execution; only the fixed confirmation-gated pre-match sequence can launch
   the FACEIT AC launcher, Chrome, and Steam app 730
-- SQLite, general-purpose IPC, tray UI, microphone, STT, TTS, Qwen, or learning
+- general-purpose memory commands or a learning pipeline, general-purpose IPC, tray
+  UI, microphone, STT, TTS, Qwen, or learning workers
 
 ## Measurement result (2 October 2026)
 
@@ -100,11 +128,20 @@ component, or service. No dedicated CPU-load benchmark was captured.
   induced, so live transition accuracy and event-to-detection latency remain
   unmeasured; synthetic policy tests do not replace that measurement.
 
-The measured polling cadence gives no evidence that native event subscriptions
-are currently necessary. The controlled fixture result below verifies policy
-transitions but does not establish live OS detection latency. Keep startup
-reconciliation and fail-closed behavior authoritative, and do not add a
-general executable- or PID-based API.
+The measured poller remains the correctness watchdog. A lifecycle-subscription
+probe in an isolated build received WMI access denied (`0x80041003`), so
+event-driven latency is not available in this current run; the safe operating
+path is still the 500 ms identity-verified snapshot fallback. No elevation,
+WMI ACL, service, FACEIT, Chrome, or CS2 change was made. The controlled fixture
+result below verifies policy transitions but does not establish live OS
+detection latency. Keep startup reconciliation and fail-closed behavior
+authoritative, and do not add a general executable- or PID-based API.
+
+The updated monitor executable was tested in an isolated target directory but
+was not substituted for or used to restart the already-running resident
+monitor. The user's live monitor was left untouched. The new preferred-app
+commands require a matching updated resident monitor before they can be used;
+they have not been exercised against the production database.
 
 ## Controlled transition fixture result
 

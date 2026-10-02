@@ -60,6 +60,7 @@ impl ApplicationCatalog {
 pub struct ValidatedConfiguration {
     applications: ApplicationCatalog,
     faceit_setup_status: FaceitSetupStatus,
+    exit_cooldown_seconds: u16,
 }
 
 impl ValidatedConfiguration {
@@ -78,6 +79,11 @@ impl ValidatedConfiguration {
     #[must_use]
     pub const fn faceit_setup_status(&self) -> FaceitSetupStatus {
         self.faceit_setup_status
+    }
+
+    #[must_use]
+    pub const fn exit_cooldown_seconds(&self) -> u16 {
+        self.exit_cooldown_seconds
     }
 
     fn from_documents(documents: ConfigDocuments) -> Result<Self, ConfigError> {
@@ -524,6 +530,7 @@ fn validate(raw: RawConfiguration) -> Result<ValidatedConfiguration, ConfigError
         Ok(ValidatedConfiguration {
             applications,
             faceit_setup_status: FaceitSetupStatus::VerificationRequired,
+            exit_cooldown_seconds: raw.competitive.activation.exit_cooldown_seconds,
         })
     } else {
         Err(ConfigError::Validation(violations))
@@ -1248,6 +1255,7 @@ mod tests {
             configuration.faceit_setup_status(),
             FaceitSetupStatus::VerificationRequired
         );
+        assert_eq!(configuration.exit_cooldown_seconds(), 5);
     }
 
     #[test]

@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use jarvis_storage::{EventId, PreferenceKey, ReferenceId};
 
 use jarvis_gaming::{
     pre_match_setup_status, DetectionHealth, FailClosedTriggerDetector, PreMatchSetupStatus,
@@ -22,13 +24,15 @@ use jarvis_gaming::{
 };
 use jarvis_profiles::{Profile, TransitionCause, TransitionState};
 use jarvis_windows::{
-    send_supervisor_control_request, InternalWorker, SupervisorControlCommand,
+    observe_competitive_activity, send_supervisor_control_request, verify_default_pre_match_setup,
+    CompetitiveLifecycleNotifications, InternalWorker, PreferredApp, SupervisorControlCommand,
     SupervisorControlPipeServer,
 };
 use supervisor::{ActivityReconciliation, RouteOutcome, Supervisor};
 
 const MAX_CONSOLE_COMMAND_BYTES: usize = 4 * 1024;
 const COMPETITIVE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const CONTROL_EVENT_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 fn main() -> ExitCode {
     match config_directory().and_then(|directory| run(env::args().skip(1).collect(), &directory)) {
@@ -45,6 +49,10 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--prepare-faceit-cs2" => return prepare_faceit_cs2(),
         [flag] if flag == "--worker-self-check" => return worker_self_check_client(),
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
+        [flag] if flag == "--show-preferred-app" => return show_preferred_app(),
+        [flag, app] if flag == "--remember-preferred-app" => {
+            return remember_preferred_app(app);
+        }
         [flag, diagnostics] if flag == "--supervisor-status" && diagnostics == "--diagnostics" => {
             return supervisor_status(true);
         }
@@ -67,8 +75,11 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             monitor_competitive(&mut supervisor, true)
         }
         [flag] if flag == "--pre-match-setup-self-check" => pre_match_setup_self_check(),
+        [flag] if flag == "--lifecycle-notification-self-check" => {
+            lifecycle_notification_self_check()
+        }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --pre-match-setup-self-check | --prepare-faceit-cs2]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -87,7 +98,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     writeln!(output, "runtime supervisor: active for this process").map_err(io_error)?;
     writeln!(
         output,
-        "fixed-identity activity monitoring: authoritative resident poller available through --monitor-competitive; --detection-self-check reconciles once"
+        "fixed-identity monitoring: --monitor-competitive uses lifecycle hints when available plus a 500 ms identity snapshot watchdog; --detection-self-check reconciles once"
     )
     .map_err(io_error)?;
     writeln!(
@@ -319,10 +330,31 @@ fn detection_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
     Ok(())
 }
 
-/// Keeps the supervisor alive, reconciling fixed process/service snapshots at
-/// startup and every 500 ms until the user closes the console with Ctrl+C. It
-/// owns the exclusive same-user control pipe used by launch/worker clients.
+/// Keeps the supervisor alive, subscribing before startup reconciliation,
+/// reconciling promptly on fixed lifecycle hints, and retaining a 500 ms
+/// snapshot watchdog. It owns the exclusive same-user control pipe used by
+/// launch/worker clients.
 fn monitor_competitive(supervisor: &mut Supervisor, diagnostics: bool) -> Result<(), String> {
+    let mut lifecycle_notifications = match verify_default_pre_match_setup() {
+        Ok(setup) => match CompetitiveLifecycleNotifications::start(&setup) {
+            Ok(notifications) => {
+                println!("fixed process/service lifecycle subscriptions: ready");
+                Some(notifications)
+            }
+            Err(error) => {
+                eprintln!(
+                    "fixed lifecycle subscriptions unavailable; authoritative 500 ms snapshot polling remains active: {error}"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "pre-match setup is currently unverified; event subscriptions are unavailable, and the fail-closed snapshot source will retry setup while keeping policy restricted: {error}"
+            );
+            None
+        }
+    };
     let mut detector = FailClosedTriggerDetector::new(WindowsCompetitiveActivitySource::new());
     let mut last_report = None;
     println!("Jarvis authoritative competitive supervisor; press Ctrl+C to stop.");
@@ -336,14 +368,18 @@ fn monitor_competitive(supervisor: &mut Supervisor, diagnostics: bool) -> Result
     }
 
     let (event_sender, event_receiver) = mpsc::sync_channel(1);
-    start_supervisor_control_pipe(event_sender)?;
+    if let Err(error) = start_supervisor_control_pipe(event_sender) {
+        let _ = supervisor.enter_competitive(TransitionCause::DetectionUnhealthy);
+        return Err(format!(
+            "control pipe unavailable; policy was restricted: {error}"
+        ));
+    }
     println!("authoritative same-user control pipe: ready");
 
     let mut next_poll = Instant::now() + COMPETITIVE_POLL_INTERVAL;
     let mut last_reconciliation_started_at = Some(Instant::now());
     loop {
-        let timeout = next_poll.saturating_duration_since(Instant::now());
-        match event_receiver.recv_timeout(timeout) {
+        match event_receiver.try_recv() {
             Ok(MonitorControlEvent::Request { command, reply }) => {
                 let request_started_at = Instant::now();
                 let response =
@@ -357,6 +393,7 @@ fn monitor_competitive(supervisor: &mut Supervisor, diagnostics: bool) -> Result
                 let _ = reply.send(response);
                 last_reconciliation_started_at = Some(request_started_at);
                 next_poll = Instant::now() + COMPETITIVE_POLL_INTERVAL;
+                continue;
             }
             Ok(MonitorControlEvent::Failed(reason)) => {
                 let _ = supervisor.enter_competitive(TransitionCause::DetectionUnhealthy);
@@ -364,7 +401,41 @@ fn monitor_competitive(supervisor: &mut Supervisor, diagnostics: bool) -> Result
                     "authoritative control pipe failed; policy was forced closed: {reason}"
                 ));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = supervisor.enter_competitive(TransitionCause::DetectionUnhealthy);
+                return Err(
+                    "authoritative control pipe stopped; policy was forced closed".to_owned(),
+                );
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        let wait_duration = monitor_wait_slice(next_poll, Instant::now());
+        let notification_result = match lifecycle_notifications.as_ref() {
+            Some(notifications) => notifications.wait_for_change(wait_duration),
+            None => {
+                thread::sleep(wait_duration);
+                Ok(false)
+            }
+        };
+        match notification_result {
+            Ok(true) => {
+                // Event contents are intentionally opaque: every hint is
+                // reconciled by the existing complete identity-verifying
+                // process/service snapshot path.
+                let cycle_started = Instant::now();
+                monitor_after_lifecycle_hint(supervisor, &mut detector, &mut last_report)?;
+                if diagnostics {
+                    eprintln!(
+                        "JARVIS_METRIC kind=monitor_lifecycle_reconcile cycle_us={}",
+                        cycle_started.elapsed().as_micros()
+                    );
+                }
+                last_reconciliation_started_at = Some(cycle_started);
+                // Do not move `next_poll`: event bursts cannot defer the
+                // periodic watchdog snapshot.
+            }
+            Ok(false) if Instant::now() >= next_poll => {
                 let cycle_started = Instant::now();
                 let interval_us = last_reconciliation_started_at
                     .map(|previous| cycle_started.duration_since(previous).as_micros())
@@ -379,11 +450,12 @@ fn monitor_competitive(supervisor: &mut Supervisor, diagnostics: bool) -> Result
                 last_reconciliation_started_at = Some(cycle_started);
                 next_poll = cycle_started + COMPETITIVE_POLL_INTERVAL;
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = supervisor.enter_competitive(TransitionCause::DetectionUnhealthy);
-                return Err(
-                    "authoritative control pipe stopped; policy was forced closed".to_owned(),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!(
+                    "fixed lifecycle notification source failed; dropping it and continuing with the authoritative 500 ms snapshot watchdog: {error}"
                 );
+                lifecycle_notifications = None;
             }
         }
     }
@@ -456,8 +528,45 @@ fn monitor_cycle<S: jarvis_gaming::TriggerSnapshotSource>(
         ActivityReconciliation,
     )>,
 ) -> Result<jarvis_gaming::TriggerObservation, String> {
+    monitor_cycle_at(supervisor, detector, last_report, Instant::now())
+}
+
+/// A lifecycle event is only permission to take a fresh fixed snapshot; it
+/// carries no process identity or trigger state into policy.
+fn monitor_after_lifecycle_hint<S: jarvis_gaming::TriggerSnapshotSource>(
+    supervisor: &mut Supervisor,
+    detector: &mut FailClosedTriggerDetector<S>,
+    last_report: &mut Option<(
+        TriggerSnapshot,
+        DetectionHealth,
+        Profile,
+        TransitionState,
+        ActivityReconciliation,
+    )>,
+) -> Result<jarvis_gaming::TriggerObservation, String> {
+    monitor_cycle(supervisor, detector, last_report)
+}
+
+fn monitor_wait_slice(next_poll: Instant, now: Instant) -> Duration {
+    next_poll
+        .saturating_duration_since(now)
+        .min(CONTROL_EVENT_CHECK_INTERVAL)
+}
+
+fn monitor_cycle_at<S: jarvis_gaming::TriggerSnapshotSource>(
+    supervisor: &mut Supervisor,
+    detector: &mut FailClosedTriggerDetector<S>,
+    last_report: &mut Option<(
+        TriggerSnapshot,
+        DetectionHealth,
+        Profile,
+        TransitionState,
+        ActivityReconciliation,
+    )>,
+    now: Instant,
+) -> Result<jarvis_gaming::TriggerObservation, String> {
     let observation = detector.observe();
-    let action = match supervisor.reconcile_activity(observation) {
+    let action = match supervisor.reconcile_activity_at(observation, now) {
         Ok(action) => action,
         Err(error) => {
             let _ = supervisor.enter_competitive(TransitionCause::DetectionUnhealthy);
@@ -521,6 +630,37 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
             observation.snapshot.verified_faceit_process_running,
             observation.snapshot.verified_faceit_service_active,
         )),
+        SupervisorControlCommand::RememberPreferredApp { event_id, expected_generation, app } => {
+            let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
+            let id = EventId::new(format!("{event_id:032x}"))
+                .map_err(|error| error.to_string())?;
+            let target = ReferenceId::new(app.application_id())
+                .map_err(|error| error.to_string())?;
+            match supervisor.record_explicit_preference(expected_generation, &id, &key, &target) {
+                Ok(outcome) => Ok(format!("OK PREFERRED_APP APP={} RESULT={outcome:?}", app.application_id())),
+                Err(supervisor::PersistentMemoryError::ProfileGateClosed | supervisor::PersistentMemoryError::StaleGeneration) => Ok("ERR POLICY".to_owned()),
+                Err(error) => {
+                    eprintln!("preferred app write failed: {error}");
+                    Ok("ERR STORAGE".to_owned())
+                }
+            }
+        }
+        SupervisorControlCommand::ShowPreferredApp => {
+            let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
+            match supervisor.read_explicit_preference(status.generation.value(), &key) {
+                Ok(None) => Ok("OK PREFERRED_APP NONE".to_owned()),
+                Ok(Some(stored)) => match stored.target.as_str() {
+                    "chrome" => Ok("OK PREFERRED_APP APP=chrome".to_owned()),
+                    "discord" => Ok("OK PREFERRED_APP APP=discord".to_owned()),
+                    _ => Ok("ERR STORED_VALUE".to_owned()),
+                },
+                Err(supervisor::PersistentMemoryError::ProfileGateClosed | supervisor::PersistentMemoryError::StaleGeneration) => Ok("ERR POLICY".to_owned()),
+                Err(error) => {
+                    eprintln!("preferred app read failed: {error}");
+                    Ok("ERR STORAGE".to_owned())
+                }
+            }
+        }
         SupervisorControlCommand::PrepareFaceitCs2 => {
             if !status.action_gate_open {
                 return Ok("ERR POLICY".to_owned());
@@ -600,6 +740,36 @@ fn pre_match_setup_self_check() -> Result<(), String> {
     Ok(())
 }
 
+/// Verifies that this user can establish and read from Jarvis's temporary,
+/// fixed-scope process/service notifications. It starts no process or service;
+/// any received event is followed by a fresh read-only identity snapshot.
+fn lifecycle_notification_self_check() -> Result<(), String> {
+    let setup = verify_default_pre_match_setup().map_err(|error| error.to_string())?;
+    let notifications =
+        CompetitiveLifecycleNotifications::start(&setup).map_err(|error| error.to_string())?;
+    let initial = observe_competitive_activity(&setup).map_err(|error| error.to_string())?;
+    let hint_received = notifications
+        .wait_for_change(Duration::from_secs(1))
+        .map_err(|error| error.to_string())?;
+    let current = if hint_received {
+        observe_competitive_activity(&setup).map_err(|error| error.to_string())?
+    } else {
+        initial
+    };
+    println!("Jarvis fixed lifecycle-notification self-check");
+    println!("process start/stop subscriptions: ready (CS2 and fixed FACEIT images)");
+    println!("FACEITService status subscription: ready (query-only)");
+    println!("event hint received during one-second check: {hint_received}");
+    println!(
+        "identity-verified snapshot: CS2={} FACEIT_AC={} FACEIT_SERVICE={}",
+        current.cs2_running,
+        current.verified_faceit_process_running,
+        current.verified_faceit_service_active,
+    );
+    println!("execution: no process, service, browser, game, or login was started or changed");
+    Ok(())
+}
+
 fn supervisor_status(diagnostics: bool) -> Result<(), String> {
     let request_started_at = Instant::now();
     let response = send_supervisor_control_request(SupervisorControlCommand::Status).map_err(
@@ -621,6 +791,93 @@ fn supervisor_status(diagnostics: bool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn show_preferred_app() -> Result<(), String> {
+    let response = send_supervisor_control_request(SupervisorControlCommand::ShowPreferredApp)
+        .map_err(|error| format!("resident supervisor unavailable: {error}"))?;
+    if response == "OK PREFERRED_APP NONE" {
+        println!("No preferred app is saved.");
+    } else if let Some(app) = response.strip_prefix("OK PREFERRED_APP APP=") {
+        if !matches!(app, "chrome" | "discord") {
+            return Err("resident supervisor returned an invalid preference".to_owned());
+        }
+        println!("Saved preferred app: {app}");
+    } else {
+        return Err(format!("preferred app unavailable: {response}"));
+    }
+    Ok(())
+}
+
+fn remember_preferred_app(app: &str) -> Result<(), String> {
+    let app = match app {
+        "chrome" => PreferredApp::Chrome,
+        "discord" => PreferredApp::Discord,
+        _ => return Err("choose exactly chrome or discord".to_owned()),
+    };
+    let status = send_supervisor_control_request(SupervisorControlCommand::Status)
+        .map_err(|error| format!("resident supervisor unavailable: {error}"))?;
+    let expected_generation = admitted_memory_generation(&status)?;
+    println!("Save {} as your preferred app? This is informational and will not change launches or routing.", app.application_id());
+    print!("Type SAVE to continue, or press Enter to cancel: ");
+    io::stdout().flush().map_err(io_error)?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).map_err(io_error)?;
+    if answer.trim_end_matches(['\r', '\n']) != "SAVE" {
+        println!("Cancelled; no preference was written.");
+        return Ok(());
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let event_id = nanos ^ (u128::from(std::process::id()) << 96);
+    let response =
+        send_supervisor_control_request(SupervisorControlCommand::RememberPreferredApp {
+            event_id,
+            expected_generation,
+            app,
+        })
+        .map_err(|error| {
+            format!("resident supervisor unavailable; no preference was written: {error}")
+        })?;
+    if response
+        == format!(
+            "OK PREFERRED_APP APP={} RESULT=Inserted",
+            app.application_id()
+        )
+        || response
+            == format!(
+                "OK PREFERRED_APP APP={} RESULT=AlreadyRecorded",
+                app.application_id()
+            )
+    {
+        println!(
+            "Preferred app saved: {}. This does not launch it or change routing.",
+            app.application_id()
+        );
+        Ok(())
+    } else {
+        Err(format!("preference was not saved: {response}"))
+    }
+}
+
+fn admitted_memory_generation(status: &str) -> Result<u64, String> {
+    if !status.starts_with("OK STATUS ")
+        || !status.contains(" PROFILE=GodMode ")
+        || !status.contains(" TRANSITION=Stable ")
+        || !status.contains(" ACTION_GATE=true ")
+        || !status.contains(" WORKER_GATE=true ")
+    {
+        return Err(
+            "resident supervisor is not in stable God Mode; no preference was written".to_owned(),
+        );
+    }
+    status
+        .split_ascii_whitespace()
+        .find_map(|field| field.strip_prefix("GENERATION="))
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "resident supervisor returned an invalid generation".to_owned())
 }
 
 /// Requests the fixed FACEIT AC → Chrome → Steam sequence from the resident
@@ -671,6 +928,23 @@ fn config_directory() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preference_admission_requires_stable_god_mode_and_both_gates() {
+        let valid = "OK STATUS PROFILE=GodMode TRANSITION=Stable GENERATION=7 ACTION_GATE=true WORKER_GATE=true DETECTION=Healthy";
+        assert_eq!(admitted_memory_generation(valid), Ok(7));
+        assert!(admitted_memory_generation(
+            &valid.replace("WORKER_GATE=true", "WORKER_GATE=false")
+        )
+        .is_err());
+        assert!(admitted_memory_generation(
+            &valid.replace("PROFILE=GodMode", "PROFILE=CompetitiveMode")
+        )
+        .is_err());
+        assert!(
+            admitted_memory_generation(&valid.replace("GENERATION=7", "GENERATION=bad")).is_err()
+        );
+    }
     use std::collections::VecDeque;
 
     struct SequenceSnapshotSource(VecDeque<Result<TriggerSnapshot, DetectionHealth>>);
@@ -707,24 +981,48 @@ mod tests {
             verified_faceit_service_active: true,
             ..TriggerSnapshot::default()
         };
-        let fixture_snapshots = [clear, faceit, faceit_and_cs2, cs2, faceit_service, clear];
+        let fixture_snapshots = [
+            clear,
+            faceit,
+            faceit_and_cs2,
+            cs2,
+            faceit_service,
+            clear,
+            clear,
+        ];
         let fixture_results = fixture_snapshots.into_iter().map(Ok).collect();
         let mut detector = FailClosedTriggerDetector::new(SequenceSnapshotSource(fixture_results));
         let mut supervisor = Supervisor::bootstrap(&test_config_directory())
             .expect("checked-in configuration and the empty Job Object should initialize");
         let mut last_report = None;
+        let start = Instant::now();
         let expected_profiles = [
             Profile::GodMode,
             Profile::Competitive,
             Profile::Competitive,
             Profile::Competitive,
             Profile::Competitive,
+            Profile::Competitive,
             Profile::GodMode,
         ];
+        let fixture_times = [
+            start,
+            start + Duration::from_secs(1),
+            start + Duration::from_secs(2),
+            start + Duration::from_secs(3),
+            start + Duration::from_secs(4),
+            start + Duration::from_secs(5),
+            start + Duration::from_secs(10),
+        ];
 
-        for (fixture, expected_profile) in fixture_snapshots.into_iter().zip(expected_profiles) {
-            let observation = monitor_cycle(&mut supervisor, &mut detector, &mut last_report)
-                .expect("synthetic monitor cycle should reconcile without external processes");
+        for ((fixture, expected_profile), now) in fixture_snapshots
+            .into_iter()
+            .zip(expected_profiles)
+            .zip(fixture_times)
+        {
+            let observation =
+                monitor_cycle_at(&mut supervisor, &mut detector, &mut last_report, now)
+                    .expect("synthetic monitor cycle should reconcile without external processes");
             let status = supervisor.status().expect("query fixture profile state");
 
             assert!(observation.snapshot.detection_healthy);
@@ -742,6 +1040,57 @@ mod tests {
                 expected_profile == Profile::GodMode
             );
         }
+    }
+
+    #[test]
+    fn lifecycle_hint_causes_a_fresh_fixed_snapshot_before_policy_changes() {
+        let clear = TriggerSnapshot::default();
+        let faceit = TriggerSnapshot {
+            verified_faceit_process_running: true,
+            ..TriggerSnapshot::default()
+        };
+        let mut detector =
+            FailClosedTriggerDetector::new(SequenceSnapshotSource([Ok(clear), Ok(faceit)].into()));
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and the empty Job Object should initialize");
+        let mut last_report = None;
+
+        let startup = monitor_cycle(&mut supervisor, &mut detector, &mut last_report)
+            .expect("startup reconciliation should take the first snapshot");
+        assert!(!startup.snapshot.any_automatic_trigger_active());
+        assert_eq!(
+            supervisor.status().expect("query baseline profile").profile,
+            Profile::GodMode
+        );
+
+        // The event supplies no PID, process name, or state; this cycle reads
+        // the next authoritative fixture snapshot and closes both gates.
+        let after_hint =
+            monitor_after_lifecycle_hint(&mut supervisor, &mut detector, &mut last_report)
+                .expect("lifecycle hint should force a fresh snapshot");
+        assert!(after_hint.snapshot.verified_faceit_process_running);
+        let status = supervisor.status().expect("query reconciled profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
+    }
+
+    #[test]
+    fn lifecycle_wait_slices_keep_the_periodic_watchdog_deadline() {
+        let start = Instant::now();
+        let next_poll = start + COMPETITIVE_POLL_INTERVAL;
+        assert_eq!(
+            monitor_wait_slice(next_poll, start),
+            CONTROL_EVENT_CHECK_INTERVAL
+        );
+        assert_eq!(
+            monitor_wait_slice(next_poll, next_poll - Duration::from_millis(20)),
+            Duration::from_millis(20)
+        );
+        assert_eq!(monitor_wait_slice(next_poll, next_poll), Duration::ZERO);
+        // The wait helper receives the deadline immutably, so lifecycle hints
+        // cannot extend the 500 ms watchdog.
+        assert_eq!(next_poll, start + COMPETITIVE_POLL_INTERVAL);
     }
 
     #[test]

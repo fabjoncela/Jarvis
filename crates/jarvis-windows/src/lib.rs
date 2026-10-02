@@ -24,10 +24,11 @@ use jarvis_windows_ffi::{
 pub use jarvis_windows_ffi::{
     observe_competitive_activity, observe_cs2_processes, send_supervisor_control_request,
     verify_default_pre_match_setup, CompetitiveActivityObservationError,
-    CompetitiveActivitySnapshot, FixedCompetitiveProcess, ObservedProcessIdentity,
-    PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError, ProcessObservationError,
-    SupervisorControlCommand, SupervisorControlPipeError, SupervisorControlPipeServer,
-    VerifiedPreMatchSetup, Win32Error, WorkerLaunchError,
+    CompetitiveActivitySnapshot, CompetitiveLifecycleNotifications, FixedCompetitiveProcess,
+    LifecycleNotificationFailure, ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep,
+    PreMatchSetupError, PreferredApp, ProcessObservationError, SupervisorControlCommand,
+    SupervisorControlPipeError, SupervisorControlPipeServer, VerifiedPreMatchSetup, Win32Error,
+    WorkerLaunchError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

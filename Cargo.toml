@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/jarvis-verification",
     "apps/jarvis",
     "apps/session-worker",
     "crates/jarvis-actions",
@@ -8,6 +9,7 @@ members = [
     "crates/jarvis-gaming",
     "crates/jarvis-profiles",
     "crates/jarvis-router",
+    "crates/jarvis-storage",
     "crates/jarvis-windows",
     "crates/jarvis-windows-ffi",
 ]

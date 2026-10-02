@@ -34,8 +34,17 @@ cooperative exit, verifies Job Object emptiness after any forced fallback, and
 allows a restart only from an empty Job Object. General multi-worker lifecycle
 management and additional worker types are not implemented.
 
-The opt-in activity monitor reconciles state immediately at startup, then takes
-read-only process/service snapshots every 500 ms. Its fixed process set is
+The opt-in activity monitor reconciles state immediately at startup and takes
+authoritative read-only process/service snapshots every 500 ms. When the fixed
+FACEIT setup identities verify, it attempts process lifecycle notifications
+for the closed set (`cs2.exe`, the verified FACEIT Anti-Cheat Launcher image,
+and the verified `FACEITService`) plus a query-only Service Control Manager
+subscription. Subscriptions start before the first snapshot; event contents are
+opaque hints only, and every hint triggers a fresh complete identity-verified
+snapshot. The 500 ms watchdog remains active and is never postponed by event
+bursts. If setup is unverified, subscriptions cannot be established, or a
+source fails at runtime, the monitor falls back to the same authoritative
+polling path without elevation or permission changes. Its fixed process set is
 `cs2.exe`, the exact verified FACEIT Anti-Cheat Launcher path, and the exact
 verified FACEIT service path; it queries only limited process identity and the
 read-only Service Control Manager configuration/status. It records no target
@@ -44,18 +53,19 @@ process or service. FACEIT setup signatures and fixed installation identities
 are rechecked every 30 seconds (every five seconds while unverified). Any
 unavailable snapshot, service-path mismatch, or unverified setup is unhealthy
 and keeps both profile gates closed. God Mode can return only after a healthy
-snapshot confirms all triggers have cleared. This is a polling implementation;
-native event subscriptions are a later optimization. The owner coordinates
-supported client invocations for its current account while it remains alive.
-It is not a Windows service or automatic startup guard, and there is no
-protection after the owner exits. Other Windows accounts are unsupported by
-the single-owner endpoint.
+snapshot confirms all triggers have cleared. The owner coordinates supported
+client invocations for its current account while it remains alive. It is not a
+Windows service or automatic startup guard, and there is no protection after
+the owner exits. Other Windows accounts are unsupported by the single-owner
+endpoint.
 
 The pre-match workflow is deliberately singular: the explicit
 `--prepare-faceit-cs2` client requires the user to type `START`, then requests
 the fixed handoff through the resident owner. That owner launches the verified
-FACEIT Anti-Cheat Launcher, opens `https://www.faceit.com/` in verified Chrome
-without handling authentication, and requests CS2 through Steam app 730. It is
+FACEIT Anti-Cheat Launcher, makes one best-effort check for a visible verified
+Chrome window with a FACEIT-like title, and opens `https://www.faceit.com/` in
+Chrome if no clear title match is found. It does not verify the actual tab URL
+or handle authentication. It then requests CS2 through Steam app 730. It is
 represented as one typed action rather than three arbitrary launch APIs. The
 supervisor rechecks profile admission before each step, and each fixed launch
 repeats local identity verification. The monitor serializes the handoff with
@@ -70,6 +80,27 @@ checks that the registered `FACEITService` has exactly that service binary,
 verifies fixed Chrome and Steam installations, and confirms Steam's local
 app-730 manifest. It starts no application or service, carries no durable
 launch permission, and is not an anti-cheat compatibility certification.
+
+The V1 storage foundation is a private SQLite adapter under
+`%LOCALAPPDATA%\Jarvis\jarvis.db`. The supervisor exposes synchronous, typed
+preference/correction writes only after stable God Mode gates and the expected
+profile generation are confirmed;
+the connection is opened lazily for that call and dropped before returning.
+The numbered migration is checksummed and transactional, the schema has no
+transcript-specific field, each identifier is limited to 128 ASCII bytes, and
+writes are idempotent by event ID with an 8,192-record cap. No storage call is
+made during Competitive Mode, no worker depends on this crate, and there is
+one explicit text command for the fixed Chrome/Discord preferred-app key.
+It requires `SAVE` confirmation through the resident supervisor, is
+informational only, and does not affect routing or launch decisions. There is
+no general memory command or learning pipeline. Tests use isolated
+temporary roots rather than the production path.
+
+`jarvis-verification` separately models dispatch, exact execution-anchored
+feedback, and trusted machine observations. Dispatch or positive feedback
+alone cannot produce a verified machine outcome. Its native observation
+constructor is intentionally private until a reviewed observer exists; this
+is a contract foundation, not a live result verifier.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.

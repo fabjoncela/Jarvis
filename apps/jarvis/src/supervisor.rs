@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, ValidationError};
 use jarvis_config::{ConfigError, FaceitSetupStatus, ValidatedConfiguration};
@@ -17,6 +18,10 @@ use jarvis_profiles::{
     TransitionStart, TransitionState,
 };
 use jarvis_router::{RouteResult, Router};
+use jarvis_storage::{
+    CanonicalId, CorrectionTerm, EventId, PreferenceKey, RecordOutcome, ReferenceId, StorageError,
+    Store, StoredPreference,
+};
 use jarvis_windows::{
     run_pre_match_handoff, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport, Win32Error,
     WindowsWorkerManager, WorkerManagerError, WorkerManifest, WorkerProcessIdentity,
@@ -33,6 +38,34 @@ pub enum SupervisorError {
 pub enum WorkerStartError {
     ProfileGate(GateError),
     Manager(WorkerManagerError),
+}
+
+#[derive(Debug)]
+pub enum PersistentMemoryError {
+    ProfileGateClosed,
+    StaleGeneration,
+    Storage(StorageError),
+}
+
+impl fmt::Display for PersistentMemoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProfileGateClosed => {
+                formatter.write_str("persistent memory is disabled outside stable God Mode")
+            }
+            Self::StaleGeneration => formatter.write_str("profile generation changed"),
+            Self::Storage(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for PersistentMemoryError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ProfileGateClosed | Self::StaleGeneration => None,
+            Self::Storage(error) => Some(error),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -192,6 +225,7 @@ pub struct Supervisor {
     registry: ActionRegistry,
     worker_manifest: WorkerManifest,
     worker_manager: WindowsWorkerManager,
+    healthy_clear_since: Option<Instant>,
 }
 
 impl Supervisor {
@@ -218,6 +252,7 @@ impl Supervisor {
             registry,
             worker_manifest: WorkerManifest,
             worker_manager,
+            healthy_clear_since: None,
         })
     }
 
@@ -235,6 +270,69 @@ impl Supervisor {
             configured_internal_worker_count: self.worker_manifest.all().len(),
             faceit_setup_status: self.configuration.faceit_setup_status(),
         })
+    }
+
+    /// Appends an explicit typed preference. Store opening and migration work
+    /// happen only after both God Mode gates are open; the per-call connection
+    /// is dropped before returning and is never owned by a worker. There is no
+    /// caller must obtain explicit consent before invoking this API.
+    pub fn record_explicit_preference(
+        &self,
+        expected_generation: u64,
+        event_id: &EventId,
+        key: &PreferenceKey,
+        target: &ReferenceId,
+    ) -> Result<RecordOutcome, PersistentMemoryError> {
+        self.with_persistent_store(expected_generation, Store::open_local_app_data, |store| {
+            store.record_preference(event_id, key, target)
+        })
+    }
+
+    pub fn read_explicit_preference(
+        &self,
+        expected_generation: u64,
+        key: &PreferenceKey,
+    ) -> Result<Option<StoredPreference>, PersistentMemoryError> {
+        self.with_persistent_store(expected_generation, Store::open_local_app_data, |store| {
+            store.preference(key)
+        })
+    }
+
+    /// Appends an explicit correction using bounded identifiers, never a raw
+    /// utterance or transcript. There is no user-facing correction command
+    /// yet; future trusted callers must obtain explicit consent first.
+    #[allow(dead_code)]
+    pub fn record_explicit_correction(
+        &self,
+        expected_generation: u64,
+        event_id: &EventId,
+        term: &CorrectionTerm,
+        canonical_id: &CanonicalId,
+    ) -> Result<RecordOutcome, PersistentMemoryError> {
+        self.with_persistent_store(expected_generation, Store::open_local_app_data, |store| {
+            store.record_correction(event_id, term, canonical_id)
+        })
+    }
+
+    fn with_persistent_store<T>(
+        &self,
+        expected_generation: u64,
+        open_store: impl FnOnce() -> Result<Store, StorageError>,
+        write: impl FnOnce(&mut Store) -> Result<T, StorageError>,
+    ) -> Result<T, PersistentMemoryError> {
+        if self.controller.profile() != Profile::GodMode
+            || self.controller.transition() != TransitionState::Stable
+            || !self.controller.action_gate_open()
+            || !self.controller.worker_start_gate_open()
+        {
+            return Err(PersistentMemoryError::ProfileGateClosed);
+        }
+        if self.controller.generation().value() != expected_generation {
+            return Err(PersistentMemoryError::StaleGeneration);
+        }
+
+        let mut store = open_store().map_err(PersistentMemoryError::Storage)?;
+        write(&mut store).map_err(PersistentMemoryError::Storage)
     }
 
     /// Validates a deterministic plan against the current supervisor-owned
@@ -313,6 +411,7 @@ impl Supervisor {
         &mut self,
         cause: TransitionCause,
     ) -> Result<CompetitiveEntryResult, CompetitiveEntryError> {
+        self.healthy_clear_since = None;
         let start = self.controller.enter_competitive(cause);
         if start.was_already_restricted {
             return match self.worker_manager.active_process_count() {
@@ -376,12 +475,21 @@ impl Supervisor {
         &mut self,
         observation: TriggerObservation,
     ) -> Result<ActivityReconciliation, CompetitiveEntryError> {
+        self.reconcile_activity_at(observation, Instant::now())
+    }
+
+    pub(crate) fn reconcile_activity_at(
+        &mut self,
+        observation: TriggerObservation,
+        now: Instant,
+    ) -> Result<ActivityReconciliation, CompetitiveEntryError> {
         let snapshot = observation.snapshot;
         let cause = snapshot.first_cause().or_else(|| {
             (!snapshot.detection_healthy).then_some(TransitionCause::DetectionUnhealthy)
         });
 
         if let Some(cause) = cause {
+            self.healthy_clear_since = None;
             if self.controller.profile() == Profile::Competitive {
                 return Ok(ActivityReconciliation::RemainsRestricted);
             }
@@ -393,6 +501,20 @@ impl Supervisor {
         }
 
         if self.controller.profile() == Profile::Competitive {
+            if self.controller.transition() == TransitionState::RestrictedFault {
+                self.healthy_clear_since = None;
+                return Ok(ActivityReconciliation::RestoreDenied(
+                    RestoreError::RestrictedFault,
+                ));
+            }
+
+            let clear_since = *self.healthy_clear_since.get_or_insert(now);
+            let cooldown =
+                Duration::from_secs(u64::from(self.configuration.exit_cooldown_seconds()));
+            if now.saturating_duration_since(clear_since) < cooldown {
+                return Ok(ActivityReconciliation::RemainsRestricted);
+            }
+
             return Ok(
                 match self.controller.restore_god_mode(
                     snapshot.any_automatic_trigger_active(),
@@ -404,6 +526,7 @@ impl Supervisor {
             );
         }
 
+        self.healthy_clear_since = None;
         Ok(ActivityReconciliation::Unchanged)
     }
 }
@@ -411,9 +534,54 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jarvis_gaming::{DetectionHealth, TriggerObservation, TriggerSnapshot};
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_STORAGE_TEST_ROOT: AtomicU64 = AtomicU64::new(1);
+
+    struct StorageTestRoot(std::path::PathBuf);
+
+    impl StorageTestRoot {
+        fn new() -> Self {
+            loop {
+                let sequence = NEXT_STORAGE_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "jarvis-supervisor-storage-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create isolated storage test directory: {error}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for StorageTestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn test_config_directory() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
+    }
+
+    fn observation(cs2_running: bool, detection_healthy: bool) -> TriggerObservation {
+        TriggerObservation {
+            snapshot: TriggerSnapshot {
+                cs2_running,
+                detection_healthy,
+                ..TriggerSnapshot::default()
+            },
+            health: if detection_healthy {
+                DetectionHealth::Healthy
+            } else {
+                DetectionHealth::ActivityObservationUnavailable
+            },
+        }
     }
 
     #[test]
@@ -425,6 +593,81 @@ mod tests {
         assert_eq!(status.transition, TransitionState::Stable);
         assert_eq!(status.active_owned_worker_processes, 0);
         assert_eq!(status.configured_internal_worker_count, 1);
+    }
+
+    #[test]
+    fn trusted_explicit_writer_persists_typed_preference_in_god_mode() {
+        let supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        let root = StorageTestRoot::new();
+        let event_id = EventId::new("request-1").unwrap();
+        let key = PreferenceKey::new("preferred_browser").unwrap();
+        let target = ReferenceId::new("app:chrome").unwrap();
+
+        let result = supervisor
+            .with_persistent_store(
+                supervisor.controller.generation().value(),
+                || Store::open_in_test_root(&root.0),
+                |store| store.record_preference(&event_id, &key, &target),
+            )
+            .expect("stable God Mode permits explicit preference writes");
+        assert_eq!(result, RecordOutcome::Inserted);
+
+        // This read happens only while the fixture remains in God Mode.
+        let store = Store::open_in_test_root(&root.0).unwrap();
+        let stored = store.preference(&key).unwrap().unwrap();
+        assert_eq!(stored.event_id, event_id);
+        assert_eq!(stored.target, target);
+    }
+
+    #[test]
+    fn competitive_gate_denies_before_opening_or_accessing_storage() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        supervisor
+            .reconcile_activity(observation(true, true))
+            .expect("CS2 activity should enter Competitive Mode");
+        let root = StorageTestRoot::new();
+        let event_id = EventId::new("request-2").unwrap();
+        let key = PreferenceKey::new("preferred_browser").unwrap();
+        let target = ReferenceId::new("app:chrome").unwrap();
+        let mut open_attempted = false;
+
+        let result = supervisor.with_persistent_store(
+            supervisor.controller.generation().value(),
+            || {
+                open_attempted = true;
+                Store::open_in_test_root(&root.0)
+            },
+            |store| store.record_preference(&event_id, &key, &target),
+        );
+        assert!(matches!(
+            result,
+            Err(PersistentMemoryError::ProfileGateClosed)
+        ));
+        assert!(!open_attempted);
+        assert!(!root.0.join("jarvis.db").exists());
+    }
+
+    #[test]
+    fn stale_generation_denies_before_opening_storage() {
+        let supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let root = StorageTestRoot::new();
+        let mut opened = false;
+        let result: Result<(), PersistentMemoryError> = supervisor.with_persistent_store(
+            supervisor.controller.generation().value() + 1,
+            || {
+                opened = true;
+                Store::open_in_test_root(&root.0)
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(
+            result,
+            Err(PersistentMemoryError::StaleGeneration)
+        ));
+        assert!(!opened);
+        assert!(!root.0.join("jarvis.db").exists());
     }
 
     #[test]
@@ -557,6 +800,7 @@ mod tests {
     fn healthy_reconciliation_restores_only_after_all_triggers_clear() {
         let mut supervisor = Supervisor::bootstrap(&test_config_directory())
             .expect("checked-in configuration and Job Object should initialize");
+        let start = Instant::now();
         let active = TriggerObservation {
             snapshot: jarvis_gaming::TriggerSnapshot {
                 cs2_running: true,
@@ -574,18 +818,208 @@ mod tests {
         };
 
         supervisor
-            .reconcile_activity(active)
+            .reconcile_activity_at(active, start)
             .expect("active CS2 must enter Competitive Mode");
         assert_eq!(
             supervisor
-                .reconcile_activity(clear)
-                .expect("healthy clear snapshot should restore God Mode"),
-            ActivityReconciliation::RestoredGodMode
+                .reconcile_activity_at(clear, start)
+                .expect("healthy-clear snapshot should start the cooldown"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(clear, start + Duration::from_secs(5))
+                .expect("healthy clear should restore at exact expiry"),
+            ActivityReconciliation::RestoredGodMode,
+            "a continuously healthy, clear snapshot must persist for the configured cooldown"
         );
         let status = supervisor.status().expect("query restored profile");
         assert_eq!(status.profile, Profile::GodMode);
         assert!(status.action_gate_open);
         assert!(status.worker_start_gate_open);
+    }
+
+    #[test]
+    fn configured_five_second_cooldown_keeps_gates_closed_until_exact_expiry() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        assert_eq!(supervisor.configuration.exit_cooldown_seconds(), 5);
+
+        let start = Instant::now();
+        assert!(matches!(
+            supervisor
+                .reconcile_activity_at(observation(true, true), start)
+                .expect("CS2 should enter Competitive Mode"),
+            ActivityReconciliation::EnteredCompetitive { .. }
+        ));
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, true), start)
+                .expect("first healthy-clear snapshot starts the cooldown"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(
+                    observation(false, true),
+                    start + Duration::from_millis(4_999),
+                )
+                .expect("profile stays restricted before five seconds"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        let status = supervisor.status().expect("query restricted profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
+
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, true), start + Duration::from_secs(5),)
+                .expect("exact five-second expiry permits restoration"),
+            ActivityReconciliation::RestoredGodMode
+        );
+    }
+
+    #[test]
+    fn retrigger_restarts_the_healthy_clear_cooldown() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        let start = Instant::now();
+
+        supervisor
+            .reconcile_activity_at(observation(true, true), start)
+            .expect("CS2 should enter Competitive Mode");
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, true), start)
+                .expect("healthy-clear snapshot starts the cooldown"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(true, true), start + Duration::from_secs(3),)
+                .expect("re-trigger must keep Competitive Mode active"),
+            ActivityReconciliation::RemainsRestricted
+        );
+
+        let clear_again = start + Duration::from_secs(4);
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, true), clear_again)
+                .expect("new healthy-clear interval starts a fresh cooldown"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(
+                    observation(false, true),
+                    start + Duration::from_millis(8_999),
+                )
+                .expect("old cooldown expiry must not restore early"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, true), start + Duration::from_secs(9),)
+                .expect("fresh five-second cooldown has now elapsed"),
+            ActivityReconciliation::RestoredGodMode
+        );
+    }
+
+    #[test]
+    fn unhealthy_snapshot_resets_the_healthy_clear_cooldown() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        let start = Instant::now();
+
+        supervisor
+            .reconcile_activity_at(observation(true, true), start)
+            .expect("CS2 should enter Competitive Mode");
+        supervisor
+            .reconcile_activity_at(observation(false, true), start)
+            .expect("healthy-clear snapshot starts the cooldown");
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, false), start + Duration::from_secs(3),)
+                .expect("unhealthy detection resets the cooldown"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, true), start + Duration::from_secs(4),)
+                .expect("healthy recovery begins a new clear interval"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(
+                    observation(false, true),
+                    start + Duration::from_millis(8_999),
+                )
+                .expect("old cooldown expiry must not restore early"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        let status = supervisor.status().expect("query restricted profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
+        assert_eq!(
+            supervisor
+                .reconcile_activity_at(observation(false, true), start + Duration::from_secs(9),)
+                .expect("new five-second healthy-clear interval has elapsed"),
+            ActivityReconciliation::RestoredGodMode
+        );
+    }
+
+    #[test]
+    fn cooldown_does_not_bypass_manual_latch_or_restricted_fault() {
+        let mut manual = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        let start = Instant::now();
+        manual
+            .enter_competitive(TransitionCause::Manual)
+            .expect("manual entry should close the gates cleanly");
+        manual
+            .reconcile_activity_at(observation(false, true), start)
+            .expect("healthy-clear snapshot starts the cooldown");
+        assert_eq!(
+            manual
+                .reconcile_activity_at(observation(false, true), start + Duration::from_secs(5),)
+                .expect("manual latch still requires explicit release"),
+            ActivityReconciliation::RestoreDenied(RestoreError::ManualLatchActive)
+        );
+        let status = manual.status().expect("query manual restricted profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
+
+        let mut faulted = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        faulted
+            .enter_competitive(TransitionCause::Cs2Process)
+            .expect("competitive entry should close the gates");
+        faulted
+            .controller
+            .finish_competitive_shutdown(ShutdownVerification::Incomplete {
+                reason: "test fault".to_owned(),
+            });
+        assert_eq!(
+            faulted
+                .reconcile_activity_at(observation(false, true), start)
+                .expect("restricted fault must never restore"),
+            ActivityReconciliation::RestoreDenied(RestoreError::RestrictedFault)
+        );
+        assert_eq!(
+            faulted
+                .reconcile_activity_at(observation(false, true), start + Duration::from_secs(30),)
+                .expect("elapsed cooldown cannot release a restricted fault"),
+            ActivityReconciliation::RestoreDenied(RestoreError::RestrictedFault)
+        );
+        let status = faulted.status().expect("query faulted restricted profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert_eq!(status.transition, TransitionState::RestrictedFault);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
     }
 
     #[test]

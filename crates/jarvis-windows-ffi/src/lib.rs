@@ -10,10 +10,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod control_pipe;
+mod lifecycle_notifications;
 
 pub use control_pipe::{
-    send_supervisor_control_request, SupervisorControlCommand, SupervisorControlPipeError,
-    SupervisorControlPipeServer,
+    send_supervisor_control_request, PreferredApp, SupervisorControlCommand,
+    SupervisorControlPipeError, SupervisorControlPipeServer,
+};
+pub use lifecycle_notifications::{
+    CompetitiveLifecycleNotifications, LifecycleNotificationFailure,
 };
 
 use std::error::Error;

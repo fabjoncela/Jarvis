@@ -1,8 +1,9 @@
 //! Fixed, same-user named-pipe boundary for the one resident policy supervisor.
 //!
 //! The protocol is deliberately limited to status, the fixed FACEIT/CS2
-//! handoff, and the fixed worker containment self-check. It carries no paths,
-//! PIDs, command lines, or arbitrary action payloads.
+//! handoff, the fixed worker containment self-check, and bounded preferred-app
+//! memory requests. It carries no paths, PIDs, command lines, or arbitrary
+//! action payloads.
 
 use std::error::Error;
 use std::ffi::c_void;
@@ -38,29 +39,106 @@ const PIPE_NAME: &str = r"\\.\pipe\Jarvis.CompetitiveSupervisor.v1";
 const PIPE_OWNER_DACL: &str = "D:P(A;;GA;;;OW)";
 const MAX_REQUEST_BYTES: usize = 96;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024;
+const REMEMBER_PREFERRED_APP_PREFIX: &str = "JARVIS/1 REMEMBER_PREFERRED_APP ";
+
+/// The complete set of application references accepted by the preferred-app
+/// control protocol. These are identifiers, never executable paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreferredApp {
+    Chrome,
+    Discord,
+}
+
+impl PreferredApp {
+    #[must_use]
+    pub const fn application_id(self) -> &'static str {
+        match self {
+            Self::Chrome => "chrome",
+            Self::Discord => "discord",
+        }
+    }
+
+    const fn wire(self) -> &'static str {
+        match self {
+            Self::Chrome => "CHROME",
+            Self::Discord => "DISCORD",
+        }
+    }
+
+    fn parse_wire(value: &str) -> Option<Self> {
+        match value {
+            "CHROME" => Some(Self::Chrome),
+            "DISCORD" => Some(Self::Discord),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SupervisorControlCommand {
     Status,
     PrepareFaceitCs2,
     WorkerSelfCheck,
+    RememberPreferredApp {
+        event_id: u128,
+        expected_generation: u64,
+        app: PreferredApp,
+    },
+    ShowPreferredApp,
 }
 
 impl SupervisorControlCommand {
-    const fn wire(self) -> &'static [u8] {
+    fn wire(self) -> Vec<u8> {
         match self {
-            Self::Status => b"JARVIS/1 STATUS",
-            Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2",
-            Self::WorkerSelfCheck => b"JARVIS/1 WORKER_SELF_CHECK",
+            Self::Status => b"JARVIS/1 STATUS".to_vec(),
+            Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2".to_vec(),
+            Self::WorkerSelfCheck => b"JARVIS/1 WORKER_SELF_CHECK".to_vec(),
+            Self::RememberPreferredApp {
+                event_id,
+                expected_generation,
+                app,
+            } => format!(
+                "{REMEMBER_PREFERRED_APP_PREFIX}{event_id:032x} {expected_generation} {}",
+                app.wire()
+            )
+            .into_bytes(),
+            Self::ShowPreferredApp => b"JARVIS/1 SHOW_PREFERRED_APP".to_vec(),
         }
     }
 
     fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_REQUEST_BYTES {
+            return None;
+        }
         match bytes {
             b"JARVIS/1 STATUS" => Some(Self::Status),
             b"JARVIS/1 PREPARE_FACEIT_CS2" => Some(Self::PrepareFaceitCs2),
             b"JARVIS/1 WORKER_SELF_CHECK" => Some(Self::WorkerSelfCheck),
-            _ => None,
+            b"JARVIS/1 SHOW_PREFERRED_APP" => Some(Self::ShowPreferredApp),
+            _ => {
+                let text = std::str::from_utf8(bytes).ok()?;
+                let fields = text.strip_prefix(REMEMBER_PREFERRED_APP_PREFIX)?;
+                let mut parts = fields.split(' ');
+                let event_hex = parts.next()?;
+                let generation_text = parts.next()?;
+                let app_text = parts.next()?;
+                if parts.next().is_some()
+                    || event_hex.len() != 32
+                    || !event_hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    || generation_text.is_empty()
+                    || generation_text.len() > 1 && generation_text.starts_with('0')
+                    || !generation_text.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return None;
+                }
+                Some(Self::RememberPreferredApp {
+                    event_id: u128::from_str_radix(event_hex, 16).ok()?,
+                    expected_generation: generation_text.parse().ok()?,
+                    app: PreferredApp::parse_wire(app_text)?,
+                })
+            }
         }
     }
 }
@@ -110,7 +188,11 @@ pub struct SupervisorControlPipeServer {
 
 impl SupervisorControlPipeServer {
     pub fn bind() -> Result<Self, SupervisorControlPipeError> {
-        let pipe_name = wide(PIPE_NAME);
+        Self::bind_named(PIPE_NAME)
+    }
+
+    fn bind_named(name: &str) -> Result<Self, SupervisorControlPipeError> {
+        let pipe_name = wide(name);
         let dacl = wide(PIPE_OWNER_DACL);
         let mut security_descriptor: *mut c_void = null_mut();
 
@@ -282,7 +364,14 @@ impl Drop for SupervisorControlPipeServer {
 pub fn send_supervisor_control_request(
     command: SupervisorControlCommand,
 ) -> Result<String, SupervisorControlPipeError> {
-    let pipe_name = wide(PIPE_NAME);
+    send_supervisor_control_request_to(PIPE_NAME, command)
+}
+
+fn send_supervisor_control_request_to(
+    name: &str,
+    command: SupervisorControlCommand,
+) -> Result<String, SupervisorControlPipeError> {
+    let pipe_name = wide(name);
     // SAFETY: the pipe name is NUL-terminated and remains live for this call.
     let waited = unsafe { WaitNamedPipeW(pipe_name.as_ptr(), 1_500) };
     if waited == 0 {
@@ -494,14 +583,24 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
+    static NEXT_TEST_PIPE_ID: AtomicUsize = AtomicUsize::new(1);
+
     #[test]
     fn fixed_protocol_round_trips_through_same_executable() {
+        let pipe_name = format!(
+            r"\\.\pipe\Jarvis.ControlPipeTest.{}.{}",
+            std::process::id(),
+            NEXT_TEST_PIPE_ID.fetch_add(1, Ordering::Relaxed),
+        );
+        let server_pipe_name = pipe_name.clone();
         let (ready_sender, ready_receiver) = mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let mut server = SupervisorControlPipeServer::bind().expect("bind test pipe");
+            let mut server =
+                SupervisorControlPipeServer::bind_named(&server_pipe_name).expect("bind test pipe");
             ready_sender.send(()).expect("signal server ready");
             server
                 .serve_one(|command| {
@@ -515,11 +614,12 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("server ready");
         assert_eq!(
-            SupervisorControlPipeServer::bind().err(),
+            SupervisorControlPipeServer::bind_named(&pipe_name).err(),
             Some(SupervisorControlPipeError::AlreadyRunning)
         );
-        let response = send_supervisor_control_request(SupervisorControlCommand::Status)
-            .expect("send status request");
+        let response =
+            send_supervisor_control_request_to(&pipe_name, SupervisorControlCommand::Status)
+                .expect("send status request");
         assert_eq!(response, "OK STATUS PROFILE=GodMode");
         server_thread.join().expect("server thread should finish");
     }
@@ -535,5 +635,108 @@ mod tests {
             SupervisorControlCommand::parse(b"JARVIS/1 STATUS --pid 42"),
             None
         );
+    }
+
+    #[test]
+    fn preferred_app_commands_have_canonical_bounded_round_trips() {
+        for app in [PreferredApp::Chrome, PreferredApp::Discord] {
+            let command = SupervisorControlCommand::RememberPreferredApp {
+                event_id: u128::MAX,
+                expected_generation: u64::MAX,
+                app,
+            };
+            let wire = command.wire();
+            assert!(wire.len() <= MAX_REQUEST_BYTES);
+            assert_eq!(SupervisorControlCommand::parse(&wire), Some(command));
+        }
+        let chrome = SupervisorControlCommand::RememberPreferredApp {
+            event_id: 0xab,
+            expected_generation: 0,
+            app: PreferredApp::Chrome,
+        };
+        assert_eq!(
+            chrome.wire(),
+            b"JARVIS/1 REMEMBER_PREFERRED_APP 000000000000000000000000000000ab 0 CHROME"
+        );
+        assert_eq!(PreferredApp::Chrome.application_id(), "chrome");
+        assert_eq!(PreferredApp::Discord.application_id(), "discord");
+        assert_eq!(
+            SupervisorControlCommand::parse(&SupervisorControlCommand::ShowPreferredApp.wire()),
+            Some(SupervisorControlCommand::ShowPreferredApp)
+        );
+    }
+
+    #[test]
+    fn preferred_app_parser_rejects_noncanonical_or_oversized_requests() {
+        let valid = SupervisorControlCommand::RememberPreferredApp {
+            event_id: 0xab,
+            expected_generation: 7,
+            app: PreferredApp::Discord,
+        }
+        .wire();
+        let valid = String::from_utf8(valid).expect("canonical wire is ASCII");
+        let invalid = [
+            valid.replace("000000ab", "000000AB"),
+            valid.replace("000000ab", "00000ab"),
+            valid.replace(" 7 ", " 07 "),
+            valid.replace(" 7 ", " +7 "),
+            valid.replace("DISCORD", "discord"),
+            valid.replace("DISCORD", "CS2"),
+            format!("{valid} "),
+            format!("{valid}\n"),
+            valid.replacen(' ', "  ", 1),
+            valid.replace(" 7 ", " 18446744073709551616 "),
+        ];
+        for request in invalid {
+            assert_eq!(
+                SupervisorControlCommand::parse(request.as_bytes()),
+                None,
+                "must reject {request:?}"
+            );
+        }
+        assert_eq!(
+            SupervisorControlCommand::parse(&[b'X'; MAX_REQUEST_BYTES + 1]),
+            None
+        );
+        assert_eq!(
+            SupervisorControlCommand::parse(b"JARVIS/1 SHOW_PREFERRED_APP "),
+            None
+        );
+    }
+
+    #[test]
+    fn preferred_app_request_round_trips_on_private_test_pipe() {
+        let pipe_name = format!(
+            r"\\.\pipe\Jarvis.ControlPipeTest.{}.{}",
+            std::process::id(),
+            NEXT_TEST_PIPE_ID.fetch_add(1, Ordering::Relaxed),
+        );
+        let server_pipe_name = pipe_name.clone();
+        let command = SupervisorControlCommand::RememberPreferredApp {
+            event_id: 0xabc,
+            expected_generation: 3,
+            app: PreferredApp::Chrome,
+        };
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let mut server = SupervisorControlPipeServer::bind_named(&server_pipe_name)
+                .expect("bind private test pipe");
+            ready_sender.send(()).expect("signal server ready");
+            server
+                .serve_one(|received| {
+                    assert_eq!(received, command);
+                    "OK MEMORY SAVED".to_owned()
+                })
+                .expect("serve preferred-app request");
+        });
+        ready_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server ready");
+        assert_eq!(
+            send_supervisor_control_request_to(&pipe_name, command)
+                .expect("send preferred-app request"),
+            "OK MEMORY SAVED"
+        );
+        server_thread.join().expect("server thread should finish");
     }
 }

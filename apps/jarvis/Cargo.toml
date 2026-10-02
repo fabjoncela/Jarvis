@@ -12,7 +12,11 @@ jarvis-core = { path = "../../crates/jarvis-core" }
 jarvis-gaming = { path = "../../crates/jarvis-gaming" }
 jarvis-profiles = { path = "../../crates/jarvis-profiles" }
 jarvis-router = { path = "../../crates/jarvis-router" }
+jarvis-storage = { path = "../../crates/jarvis-storage" }
 jarvis-windows = { path = "../../crates/jarvis-windows" }
+
+[dev-dependencies]
+jarvis-storage = { path = "../../crates/jarvis-storage", features = ["test-util"] }
 
 [lints]
 workspace = true
