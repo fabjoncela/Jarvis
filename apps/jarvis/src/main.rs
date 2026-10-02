@@ -44,7 +44,10 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
     match arguments.as_slice() {
         [flag] if flag == "--prepare-faceit-cs2" => return prepare_faceit_cs2(),
         [flag] if flag == "--worker-self-check" => return worker_self_check_client(),
-        [flag] if flag == "--supervisor-status" => return supervisor_status(),
+        [flag] if flag == "--supervisor-status" => return supervisor_status(false),
+        [flag, diagnostics] if flag == "--supervisor-status" && diagnostics == "--diagnostics" => {
+            return supervisor_status(true);
+        }
         _ => {}
     }
 
@@ -57,10 +60,15 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--serve-stdin" => serve_stdin(&mut supervisor),
         [flag] if flag == "--competitive-self-check" => competitive_self_check(&mut supervisor),
         [flag] if flag == "--detection-self-check" => detection_self_check(&mut supervisor),
-        [flag] if flag == "--monitor-competitive" => monitor_competitive(&mut supervisor),
+        [flag] if flag == "--monitor-competitive" => monitor_competitive(&mut supervisor, false),
+        [flag, diagnostics]
+            if flag == "--monitor-competitive" && diagnostics == "--diagnostics" =>
+        {
+            monitor_competitive(&mut supervisor, true)
+        }
         [flag] if flag == "--pre-match-setup-self-check" => pre_match_setup_self_check(),
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive | --supervisor-status | --pre-match-setup-self-check | --prepare-faceit-cs2]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --pre-match-setup-self-check | --prepare-faceit-cs2]"
                 .to_owned(),
         ),
     }
@@ -314,24 +322,40 @@ fn detection_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
 /// Keeps the supervisor alive, reconciling fixed process/service snapshots at
 /// startup and every 500 ms until the user closes the console with Ctrl+C. It
 /// owns the exclusive same-user control pipe used by launch/worker clients.
-fn monitor_competitive(supervisor: &mut Supervisor) -> Result<(), String> {
+fn monitor_competitive(supervisor: &mut Supervisor, diagnostics: bool) -> Result<(), String> {
     let mut detector = FailClosedTriggerDetector::new(WindowsCompetitiveActivitySource::new());
     let mut last_report = None;
     println!("Jarvis authoritative competitive supervisor; press Ctrl+C to stop.");
+    let startup_cycle_started_at = Instant::now();
     monitor_cycle(supervisor, &mut detector, &mut last_report)?;
+    if diagnostics {
+        eprintln!(
+            "JARVIS_METRIC kind=startup_reconciliation duration_us={}",
+            startup_cycle_started_at.elapsed().as_micros()
+        );
+    }
 
     let (event_sender, event_receiver) = mpsc::sync_channel(1);
     start_supervisor_control_pipe(event_sender)?;
     println!("authoritative same-user control pipe: ready");
 
     let mut next_poll = Instant::now() + COMPETITIVE_POLL_INTERVAL;
+    let mut last_reconciliation_started_at = Some(Instant::now());
     loop {
         let timeout = next_poll.saturating_duration_since(Instant::now());
         match event_receiver.recv_timeout(timeout) {
             Ok(MonitorControlEvent::Request { command, reply }) => {
+                let request_started_at = Instant::now();
                 let response =
                     handle_control_request(command, supervisor, &mut detector, &mut last_report)?;
+                if diagnostics {
+                    eprintln!(
+                        "JARVIS_METRIC kind=control_request command={command:?} handler_us={}",
+                        request_started_at.elapsed().as_micros()
+                    );
+                }
                 let _ = reply.send(response);
+                last_reconciliation_started_at = Some(request_started_at);
                 next_poll = Instant::now() + COMPETITIVE_POLL_INTERVAL;
             }
             Ok(MonitorControlEvent::Failed(reason)) => {
@@ -342,7 +366,17 @@ fn monitor_competitive(supervisor: &mut Supervisor) -> Result<(), String> {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let cycle_started = Instant::now();
+                let interval_us = last_reconciliation_started_at
+                    .map(|previous| cycle_started.duration_since(previous).as_micros())
+                    .unwrap_or_default();
                 monitor_cycle(supervisor, &mut detector, &mut last_report)?;
+                if diagnostics {
+                    eprintln!(
+                        "JARVIS_METRIC kind=monitor_poll interval_us={interval_us} cycle_us={}",
+                        cycle_started.elapsed().as_micros()
+                    );
+                }
+                last_reconciliation_started_at = Some(cycle_started);
                 next_poll = cycle_started + COMPETITIVE_POLL_INTERVAL;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -565,7 +599,8 @@ fn pre_match_setup_self_check() -> Result<(), String> {
     Ok(())
 }
 
-fn supervisor_status() -> Result<(), String> {
+fn supervisor_status(diagnostics: bool) -> Result<(), String> {
+    let request_started_at = Instant::now();
     let response = send_supervisor_control_request(SupervisorControlCommand::Status).map_err(
         |error| {
             format!(
@@ -578,6 +613,12 @@ fn supervisor_status() -> Result<(), String> {
     }
     println!("Jarvis authoritative supervisor status");
     println!("{response}");
+    if diagnostics {
+        println!(
+            "JARVIS_METRIC kind=client_admission_round_trip duration_us={}",
+            request_started_at.elapsed().as_micros()
+        );
+    }
     Ok(())
 }
 

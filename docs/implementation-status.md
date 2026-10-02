@@ -64,7 +64,10 @@ pre-match launch sequence, not a running desktop assistant:
     path. The handoff and worker-start CLI commands require this authority and
     are serialized on the same owner; they fail closed if it is absent or its
     policy gates are closed. `--supervisor-status` queries its latest
-    reconciled status. Other Windows accounts are unsupported by this endpoint.
+    reconciled status. Optional `--diagnostics` flags report monotonic polling,
+    reconciliation, handler, and client round-trip durations; diagnostics are
+    off by default and do not change policy. Other Windows accounts are
+    unsupported by this endpoint.
 
 ## Explicitly not implemented
 
@@ -77,11 +80,28 @@ pre-match launch sequence, not a running desktop assistant:
   the FACEIT AC launcher, Chrome, and Steam app 730
 - SQLite, general-purpose IPC, tray UI, microphone, STT, TTS, Qwen, or learning
 
-## Next milestone
+## Measurement result (2 October 2026)
 
-Measure monitor poll and client-admission latency under normal load, and record
-false-positive/false-negative cases without interacting with game memory or
-anti-cheat internals. Add native process/service event subscriptions only if
-the fixed 500 ms polling interval proves insufficient. Keep startup
-reconciliation and fail-closed behavior authoritative; do not add a general
-executable- or PID-based API.
+An opt-in diagnostics path was added and sampled on the local Windows session.
+The already-running, exact FACEIT Anti-Cheat Launcher was observed; CS2 and the
+FACEIT service were inactive. Jarvis did not start or stop any game, FACEIT
+component, or service. No dedicated CPU-load benchmark was captured.
+
+- Startup reconciliation: 257 ms.
+- Periodic reconciliation start intervals: 500.0–515.7 ms for the observed
+  sample, against the configured 500 ms interval. Most cycles took about
+  3.7–6.0 ms; occasional 206–215 ms cycles were observed.
+- 30 status-client round-trips: 4.392–5.982 ms; median 5.093 ms; p95 5.828 ms.
+  Server-side status handlers took 3.662–5.021 ms.
+- The observed state remained consistent: FACEIT launcher active, CS2 and
+  FACEIT service inactive, detection healthy, Competitive Mode active, and
+  worker-start denied. No false-positive or false-negative observation was
+  seen in this static-state sample. No trigger start/stop transition was
+  induced, so live transition accuracy and event-to-detection latency remain
+  unmeasured; synthetic policy tests do not replace that measurement.
+
+The measured polling cadence gives no evidence that native event subscriptions
+are currently necessary. The next milestone is controlled trigger-transition
+testing using isolated fixtures, without interacting with game memory or
+anti-cheat internals. Keep startup reconciliation and fail-closed behavior
+authoritative, and do not add a general executable- or PID-based API.

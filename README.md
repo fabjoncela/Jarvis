@@ -77,6 +77,12 @@ client only when its executable path matches the Jarvis server executable. A
 second monitor cannot claim the same endpoint. If the resident process exits,
 clients cannot claim that protection is active.
 
+For opt-in timing diagnostics, start the monitor with
+`--monitor-competitive --diagnostics`; it reports monotonic reconciliation
+intervals and cycle durations. `--supervisor-status --diagnostics` reports the
+status request round-trip, including the owner's reconciliation and response.
+Diagnostics are disabled by default and do not change policy or capabilities.
+
 `--serve-stdin` keeps the same supervisor alive until `quit` or end-of-input.
 It accepts only `status` and `route <command>` requests, each of which remains
 validation-only. It is not a Windows service, competitive monitor, or action
