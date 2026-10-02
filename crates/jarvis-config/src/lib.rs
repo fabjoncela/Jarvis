@@ -27,7 +27,7 @@ const CS2_APPLICATION_ID: &str = "cs2";
 /// verifies the install-specific component identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaceitSetupStatus {
-    VerificationNotImplemented,
+    VerificationRequired,
 }
 
 /// A catalog that contains identifiers and aliases only; it never exposes an
@@ -523,7 +523,7 @@ fn validate(raw: RawConfiguration) -> Result<ValidatedConfiguration, ConfigError
     if violations.is_empty() {
         Ok(ValidatedConfiguration {
             applications,
-            faceit_setup_status: FaceitSetupStatus::VerificationNotImplemented,
+            faceit_setup_status: FaceitSetupStatus::VerificationRequired,
         })
     } else {
         Err(ConfigError::Validation(violations))
@@ -1246,7 +1246,7 @@ mod tests {
             .any(|identifier| identifier == FACEIT_ANTICHEAT_APPLICATION_ID));
         assert_eq!(
             configuration.faceit_setup_status(),
-            FaceitSetupStatus::VerificationNotImplemented
+            FaceitSetupStatus::VerificationRequired
         );
     }
 

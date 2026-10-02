@@ -50,6 +50,7 @@ cargo run -p jarvis -- --self-check
 cargo run -p jarvis -- --worker-self-check
 cargo run -p jarvis -- --competitive-self-check
 cargo run -p jarvis -- --detection-self-check
+cargo run -p jarvis -- --pre-match-setup-self-check
 cargo run -p jarvis -- --route "Jarvis, open Discord"
 cargo run -p jarvis -- --serve-stdin
 ```
@@ -89,6 +90,13 @@ FACEIT client, open `https://www.faceit.com/` in the locally verified Chrome
 installation without signing in, and launch Steam app 730 (CS2). It is not an
 arbitrary app/browser/Steam command. The current build remains
 validation-only: it does not launch any of those components or log in.
+
+`--pre-match-setup-self-check` verifies that exact local handoff setup without
+starting anything: fixed Program Files locations, valid Windows Authenticode
+trust for FACEIT/Chrome/Steam binaries, the registered `FACEITService` binary,
+and Steam's local CS2 app-730 manifest. A successful check is not FACEIT
+approval or a reusable permission; a future executor must repeat it just
+before each step.
 
 Runtime data will eventually live under `%LOCALAPPDATA%\Jarvis`, never in the
 repository. Model files, recordings, credentials, and live databases must not

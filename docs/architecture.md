@@ -45,5 +45,12 @@ currently no executor; a later implementation must re-check each local
 identity immediately before use and complete the pre-authorized handoff before
 Competitive Mode suppresses all general automation.
 
+The current native setup check is read-only: it accepts only FACEIT's fixed
+client/service locations under Program Files, verifies their Windows trust,
+checks that the registered `FACEITService` has exactly that service binary,
+verifies fixed Chrome and Steam installations, and confirms Steam's local
+app-730 manifest. It starts no application or service, carries no durable
+launch permission, and is not an anti-cheat compatibility certification.
+
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.

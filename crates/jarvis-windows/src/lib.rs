@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 
 use jarvis_core::ProfileGeneration;
 pub use jarvis_windows_ffi::{
-    observe_cs2_processes, FixedCompetitiveProcess, ObservedProcessIdentity,
-    ProcessObservationError, Win32Error, WorkerLaunchError,
+    observe_cs2_processes, verify_default_pre_match_setup, FixedCompetitiveProcess,
+    ObservedProcessIdentity, PreMatchSetupError, ProcessObservationError, VerifiedPreMatchSetup,
+    Win32Error, WorkerLaunchError,
 };
 use jarvis_windows_ffi::{
     FixedInternalWorker, InternalWorkerIdentity, KillOnCloseJob, RunningInternalWorker,

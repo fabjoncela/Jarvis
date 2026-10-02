@@ -13,7 +13,10 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use jarvis_gaming::{FailClosedTriggerDetector, WindowsCs2ProcessSource};
+use jarvis_gaming::{
+    pre_match_setup_status, FailClosedTriggerDetector, PreMatchSetupStatus,
+    WindowsCs2ProcessSource, WindowsPreMatchSetupSource,
+};
 use jarvis_profiles::TransitionCause;
 use jarvis_windows::InternalWorker;
 use supervisor::{RouteOutcome, Supervisor};
@@ -41,8 +44,9 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--worker-self-check" => worker_self_check(&mut supervisor),
         [flag] if flag == "--competitive-self-check" => competitive_self_check(&mut supervisor),
         [flag] if flag == "--detection-self-check" => detection_self_check(&mut supervisor),
+        [flag] if flag == "--pre-match-setup-self-check" => pre_match_setup_self_check(),
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --pre-match-setup-self-check]"
                 .to_owned(),
         ),
     }
@@ -92,8 +96,8 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "FACEIT identity verification (not a certification): {:?}",
-        status.faceit_setup_status
+        "FACEIT identity verification (not a certification): {:?}; use --pre-match-setup-self-check",
+        status.faceit_setup_status,
     )
     .map_err(io_error)?;
     writeln!(
@@ -294,6 +298,25 @@ fn detection_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
     println!("profile after fail-closed evaluation: {:?}", status.profile);
     println!("worker-start gate: {}", status.worker_start_gate_open);
     println!("execution: no process, service, game, FACEIT component, or desktop application was modified");
+    Ok(())
+}
+
+/// Performs one native read-only verification of the fixed FACEIT, Chrome,
+/// Steam, and CS2 handoff identities. It never starts an app or service and a
+/// later executor must perform this verification again immediately before use.
+fn pre_match_setup_self_check() -> Result<(), String> {
+    let mut source = WindowsPreMatchSetupSource;
+    let status = pre_match_setup_status(&mut source).map_err(|error| error.to_string())?;
+    if status != PreMatchSetupStatus::VerifiedForCurrentCheck {
+        return Err("pre-match setup was not verified for this check".to_owned());
+    }
+    println!("Jarvis pre-match setup self-check");
+    println!("fixed FACEIT client and registered service: verified");
+    println!("fixed Chrome and Steam installations: verified");
+    println!("Steam CS2 app 730 manifest: verified");
+    println!(
+        "execution: no FACEIT service, application, browser, Steam game, or login was started"
+    );
     Ok(())
 }
 

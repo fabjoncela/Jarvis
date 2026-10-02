@@ -13,13 +13,19 @@ use std::fmt;
 use std::fs;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_NO_MORE_FILES, FILETIME, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER,
+    ERROR_NO_MORE_FILES, FILETIME, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
+};
+use windows_sys::Win32::Security::WinTrust::{
+    WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+    WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_DISABLE_MD2_MD4,
+    WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_REVOKE_NONE, WTD_STATEACTION_IGNORE, WTD_UI_NONE,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -30,6 +36,10 @@ use windows_sys::Win32::System::JobObjects::{
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+use windows_sys::Win32::System::Services::{
+    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW, QUERY_SERVICE_CONFIGW,
+    SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessW, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess,
@@ -139,6 +149,338 @@ impl Error for ProcessObservationError {
             Self::CandidateIdentityUnavailable { .. } => None,
         }
     }
+}
+
+/// The outcome of one read-only local pre-match setup verification. This
+/// carries no paths, credentials, or authority to launch an application.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifiedPreMatchSetup {
+    _private: (),
+}
+
+/// A failure to establish the fixed local identities required for the narrow
+/// pre-match handoff. Every error is a denial condition; callers must not
+/// substitute a similarly named executable or service.
+#[derive(Debug)]
+pub enum PreMatchSetupError {
+    EnvironmentVariableMissing(&'static str),
+    Resolve {
+        component: &'static str,
+        source: std::io::Error,
+    },
+    NotRegularFile(&'static str),
+    SignatureRejected {
+        component: &'static str,
+        status: i32,
+    },
+    Service(Win32Error),
+    ServiceBinaryMismatch,
+    InvalidServiceCommandLine,
+    Cs2ManifestMissing,
+    Cs2ManifestUnreadable(std::io::Error),
+    Cs2ManifestDoesNotDescribeApp730,
+}
+
+impl fmt::Display for PreMatchSetupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EnvironmentVariableMissing(variable) => {
+                write!(
+                    formatter,
+                    "required Windows environment variable {variable} is unavailable"
+                )
+            }
+            Self::Resolve { component, source } => {
+                write!(
+                    formatter,
+                    "could not resolve fixed {component} location: {source}"
+                )
+            }
+            Self::NotRegularFile(component) => {
+                write!(
+                    formatter,
+                    "fixed {component} location is not a regular file"
+                )
+            }
+            Self::SignatureRejected { component, status } => {
+                write!(
+                    formatter,
+                    "Windows trust verification rejected {component} (status {status})"
+                )
+            }
+            Self::Service(error) => error.fmt(formatter),
+            Self::ServiceBinaryMismatch => write!(
+                formatter,
+                "FACEITService is not registered for the verified fixed service binary"
+            ),
+            Self::InvalidServiceCommandLine => write!(
+                formatter,
+                "FACEITService has an unsupported service command line"
+            ),
+            Self::Cs2ManifestMissing => write!(formatter, "Steam appmanifest_730.acf is missing"),
+            Self::Cs2ManifestUnreadable(error) => {
+                write!(
+                    formatter,
+                    "could not read Steam appmanifest_730.acf: {error}"
+                )
+            }
+            Self::Cs2ManifestDoesNotDescribeApp730 => {
+                write!(
+                    formatter,
+                    "Steam appmanifest_730.acf does not describe app 730"
+                )
+            }
+        }
+    }
+}
+
+impl Error for PreMatchSetupError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Resolve { source, .. } | Self::Cs2ManifestUnreadable(source) => Some(source),
+            Self::EnvironmentVariableMissing(_)
+            | Self::NotRegularFile(_)
+            | Self::SignatureRejected { .. }
+            | Self::ServiceBinaryMismatch
+            | Self::InvalidServiceCommandLine
+            | Self::Cs2ManifestMissing
+            | Self::Cs2ManifestDoesNotDescribeApp730 => None,
+            Self::Service(error) => Some(error),
+        }
+    }
+}
+
+/// Verifies the only local installations a future pre-match executor may use:
+/// FACEIT's client and registered service, Google Chrome, Steam, and Steam app
+/// 730. This function is read-only. It never starts a service/process, opens a
+/// browser, reads credentials, or accepts a caller-provided target.
+pub fn verify_default_pre_match_setup() -> Result<VerifiedPreMatchSetup, PreMatchSetupError> {
+    let program_files = program_files_directory("ProgramFiles")?;
+    let program_files_x86 = program_files_directory("ProgramFiles(x86)")?;
+
+    let faceit_root = program_files.join("FACEIT AC");
+    let faceit_client = fixed_regular_file(&faceit_root, "faceitclient.exe", "FACEIT client")?;
+    let faceit_service = fixed_regular_file(&faceit_root, "faceitservice.exe", "FACEIT service")?;
+    let chrome = fixed_regular_file(
+        &program_files
+            .join("Google")
+            .join("Chrome")
+            .join("Application"),
+        "chrome.exe",
+        "Chrome",
+    )?;
+    let steam_root = program_files_x86.join("Steam");
+    let steam = fixed_regular_file(&steam_root, "steam.exe", "Steam")?;
+
+    verify_trusted_signature(&faceit_client, "FACEIT client")?;
+    verify_trusted_signature(&faceit_service, "FACEIT service")?;
+    verify_trusted_signature(&chrome, "Chrome")?;
+    verify_trusted_signature(&steam, "Steam")?;
+
+    let configured_service = query_fixed_faceit_service_binary()?;
+    let configured_service = canonical_regular_file(&configured_service, "FACEITService binary")?;
+    if configured_service != faceit_service {
+        return Err(PreMatchSetupError::ServiceBinaryMismatch);
+    }
+
+    verify_cs2_manifest(&steam_root)?;
+    Ok(VerifiedPreMatchSetup { _private: () })
+}
+
+fn program_files_directory(variable: &'static str) -> Result<PathBuf, PreMatchSetupError> {
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .ok_or(PreMatchSetupError::EnvironmentVariableMissing(variable))
+}
+
+fn fixed_regular_file(
+    root: &Path,
+    filename: &str,
+    component: &'static str,
+) -> Result<PathBuf, PreMatchSetupError> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|source| PreMatchSetupError::Resolve { component, source })?;
+    let candidate = canonical_regular_file(&root.join(filename), component)?;
+    if !candidate.starts_with(&canonical_root) {
+        return Err(PreMatchSetupError::Resolve {
+            component,
+            source: std::io::Error::other("resolved outside its fixed installation directory"),
+        });
+    }
+    Ok(candidate)
+}
+
+fn canonical_regular_file(
+    path: &Path,
+    component: &'static str,
+) -> Result<PathBuf, PreMatchSetupError> {
+    let metadata =
+        fs::metadata(path).map_err(|source| PreMatchSetupError::Resolve { component, source })?;
+    if !metadata.is_file() {
+        return Err(PreMatchSetupError::NotRegularFile(component));
+    }
+    path.canonicalize()
+        .map_err(|source| PreMatchSetupError::Resolve { component, source })
+}
+
+fn verify_trusted_signature(
+    path: &Path,
+    component: &'static str,
+) -> Result<(), PreMatchSetupError> {
+    let mut path_wide = wide_null(path);
+    let mut file_info = WINTRUST_FILE_INFO {
+        cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: path_wide.as_mut_ptr(),
+        hFile: null_mut(),
+        pgKnownSubject: null_mut(),
+    };
+    let mut trust_data = WINTRUST_DATA {
+        cbStruct: size_of::<WINTRUST_DATA>() as u32,
+        pPolicyCallbackData: null_mut(),
+        pSIPClientData: null_mut(),
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        Anonymous: WINTRUST_DATA_0 {
+            pFile: &mut file_info,
+        },
+        dwStateAction: WTD_STATEACTION_IGNORE,
+        hWVTStateData: null_mut(),
+        pwszURLReference: null_mut(),
+        dwProvFlags: WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT | WTD_DISABLE_MD2_MD4,
+        dwUIContext: 0,
+        pSignatureSettings: null_mut(),
+    };
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    // SAFETY: The structures are initialized according to WinVerifyTrust's
+    // file-subject contract and retain their pointed-to UTF-16/path storage for
+    // the synchronous call. WTD_UI_NONE prevents UI and no state handle is
+    // requested, so this performs verification only.
+    let status = unsafe {
+        WinVerifyTrust(
+            null_mut(),
+            &mut action,
+            (&mut trust_data as *mut WINTRUST_DATA).cast::<c_void>(),
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(PreMatchSetupError::SignatureRejected { component, status })
+    }
+}
+
+fn query_fixed_faceit_service_binary() -> Result<PathBuf, PreMatchSetupError> {
+    // SAFETY: Null machine and database names select the local active SCM;
+    // connect access is read-only and the returned handle is closed below.
+    let manager = unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return Err(PreMatchSetupError::Service(last_error("OpenSCManagerW")));
+    }
+    let service_name = wide_null_os(std::ffi::OsStr::new("FACEITService"));
+    // SAFETY: manager is live, name is null-terminated and retained for this
+    // synchronous read-only query; the returned handle is closed below.
+    let service = unsafe { OpenServiceW(manager, service_name.as_ptr(), SERVICE_QUERY_CONFIG) };
+    if service.is_null() {
+        // SAFETY: manager is an owned handle that is not used after close.
+        unsafe {
+            let _ = CloseServiceHandle(manager);
+        }
+        return Err(PreMatchSetupError::Service(last_error("OpenServiceW")));
+    }
+    let result = query_service_binary_path(service);
+    // SAFETY: service and manager are owned successful open handles and no
+    // longer used after these close operations.
+    unsafe {
+        let _ = CloseServiceHandle(service);
+        let _ = CloseServiceHandle(manager);
+    }
+    result
+}
+
+fn query_service_binary_path(service: SC_HANDLE) -> Result<PathBuf, PreMatchSetupError> {
+    let mut required = 0_u32;
+    // SAFETY: A null buffer and zero length is the documented sizing query;
+    // `required` is valid writable storage.
+    let sized = unsafe { QueryServiceConfigW(service, null_mut(), 0, &mut required) };
+    // SAFETY: This reads the thread-local error set by the immediately
+    // preceding sizing call, before any other Win32 call can replace it.
+    let sizing_error = unsafe { GetLastError() };
+    if sized != 0 || sizing_error != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+        return Err(PreMatchSetupError::Service(last_error(
+            "QueryServiceConfigW",
+        )));
+    }
+    let word_count = (required as usize).div_ceil(size_of::<usize>());
+    let mut buffer = vec![0_usize; word_count];
+    // SAFETY: The usize buffer is sufficiently aligned for the service
+    // structure and has at least the requested byte length.
+    let config = buffer.as_mut_ptr().cast::<QUERY_SERVICE_CONFIGW>();
+    // SAFETY: `service` remains open, `config` points to the aligned writable
+    // buffer, and `required` is both its documented byte limit and output size.
+    let read = unsafe { QueryServiceConfigW(service, config, required, &mut required) };
+    if read == 0 {
+        return Err(PreMatchSetupError::Service(last_error(
+            "QueryServiceConfigW",
+        )));
+    }
+    // SAFETY: QueryServiceConfigW succeeded and initialized the fixed header
+    // at the beginning of `buffer`; its string pointer addresses this live
+    // buffer for the duration of this conversion.
+    let binary_path = unsafe { (*config).lpBinaryPathName };
+    if binary_path.is_null() {
+        return Err(PreMatchSetupError::InvalidServiceCommandLine);
+    }
+    // SAFETY: A successful service query returned a non-null, null-terminated
+    // string pointer whose backing buffer remains live in this function.
+    let command_line = unsafe { wide_pointer_to_string(binary_path) };
+    parse_quoted_service_binary(&command_line)
+        .map(PathBuf::from)
+        .ok_or(PreMatchSetupError::InvalidServiceCommandLine)
+}
+
+fn verify_cs2_manifest(steam_root: &Path) -> Result<(), PreMatchSetupError> {
+    let manifest = steam_root.join("steamapps").join("appmanifest_730.acf");
+    let metadata = fs::metadata(&manifest).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            PreMatchSetupError::Cs2ManifestMissing
+        } else {
+            PreMatchSetupError::Cs2ManifestUnreadable(error)
+        }
+    })?;
+    if metadata.len() > 64 * 1024 {
+        return Err(PreMatchSetupError::Cs2ManifestDoesNotDescribeApp730);
+    }
+    let content =
+        fs::read_to_string(&manifest).map_err(PreMatchSetupError::Cs2ManifestUnreadable)?;
+    if is_cs2_app_manifest(&content) {
+        Ok(())
+    } else {
+        Err(PreMatchSetupError::Cs2ManifestDoesNotDescribeApp730)
+    }
+}
+
+fn is_cs2_app_manifest(content: &str) -> bool {
+    content.contains("\"appid\"\t\t\"730\"")
+}
+
+fn parse_quoted_service_binary(command_line: &str) -> Option<&str> {
+    let trimmed = command_line.trim();
+    let path = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+    (!path.is_empty()).then_some(path)
+}
+
+unsafe fn wide_pointer_to_string(pointer: *mut u16) -> String {
+    let mut length = 0_usize;
+    // SAFETY: The caller supplies a non-null Windows UTF-16 string pointer
+    // returned by QueryServiceConfigW, which is documented as null-terminated.
+    while unsafe { *pointer.add(length) } != 0 {
+        length += 1;
+    }
+    // SAFETY: The loop above found the terminator within the same documented
+    // service-owned UTF-16 string, so this exact non-terminator range is live.
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, length) })
 }
 
 impl FixedInternalWorker {
@@ -844,10 +1186,11 @@ fn shutdown_signal_name(worker: FixedInternalWorker, identity: InternalWorkerIde
 }
 
 fn wide_null(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
+    wide_null_os(path.as_os_str())
+}
+
+fn wide_null_os(value: &std::ffi::OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 fn filetime_value(value: FILETIME) -> u64 {
@@ -862,5 +1205,33 @@ mod tests {
     fn a_new_job_has_no_active_processes() {
         let job = KillOnCloseJob::create().expect("create an empty Job Object");
         assert_eq!(job.active_process_count().expect("query Job Object"), 0);
+    }
+
+    #[test]
+    fn fixed_faceit_service_command_line_allows_only_one_quoted_binary() {
+        assert_eq!(
+            parse_quoted_service_binary("\"C:\\Program Files\\FACEIT AC\\faceitservice.exe\""),
+            Some("C:\\Program Files\\FACEIT AC\\faceitservice.exe")
+        );
+        assert_eq!(
+            parse_quoted_service_binary(
+                "\"C:\\Program Files\\FACEIT AC\\faceitservice.exe\" --extra"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_quoted_service_binary("C:\\Program Files\\FACEIT AC\\faceitservice.exe"),
+            None
+        );
+    }
+
+    #[test]
+    fn cs2_manifest_must_name_only_the_expected_steam_appid_field() {
+        assert!(is_cs2_app_manifest(
+            "\"AppState\"\n{\n\"appid\"\t\t\"730\"\n}"
+        ));
+        assert!(!is_cs2_app_manifest(
+            "\"AppState\"\n{\n\"appid\"\t\t\"570\"\n}"
+        ));
     }
 }

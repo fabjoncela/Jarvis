@@ -8,8 +8,43 @@ use jarvis_profiles::{
     TransitionState,
 };
 use jarvis_windows::{
-    observe_cs2_processes, ProcessObservationError, WorkerLifecycle, WorkerState,
+    observe_cs2_processes, verify_default_pre_match_setup, PreMatchSetupError,
+    ProcessObservationError, WorkerLifecycle, WorkerState,
 };
+
+/// Read-only setup check for the three fixed pre-match launch targets. A
+/// future executor must invoke this again immediately before every handoff;
+/// a previous successful check is never a durable grant.
+pub trait PreMatchSetupSource {
+    fn verify_pre_match_setup(&mut self) -> Result<(), PreMatchSetupError>;
+}
+
+/// Native source for the fixed local FACEIT, Chrome, Steam, and CS2 checks.
+/// It has no API for arbitrary paths, services, processes, or URLs.
+pub struct WindowsPreMatchSetupSource;
+
+impl PreMatchSetupSource for WindowsPreMatchSetupSource {
+    fn verify_pre_match_setup(&mut self) -> Result<(), PreMatchSetupError> {
+        verify_default_pre_match_setup().map(|_| ())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreMatchSetupStatus {
+    VerifiedForCurrentCheck,
+    Unverified,
+}
+
+/// Converts a verifier result into an explicit, non-cacheable status. The
+/// error is retained by the caller for diagnostics; this status alone may not
+/// authorize an operating-system action.
+pub fn pre_match_setup_status(
+    source: &mut impl PreMatchSetupSource,
+) -> Result<PreMatchSetupStatus, PreMatchSetupError> {
+    source
+        .verify_pre_match_setup()
+        .map(|()| PreMatchSetupStatus::VerifiedForCurrentCheck)
+}
 
 /// Read-only source for the fixed `cs2.exe` trigger. This trait keeps policy
 /// tests deterministic and prevents the gaming layer from accepting arbitrary
@@ -192,6 +227,17 @@ mod tests {
 
     struct FixedCs2Source(Result<bool, ProcessObservationError>);
 
+    struct FixedPreMatchSetupSource(Result<(), PreMatchSetupError>);
+
+    impl PreMatchSetupSource for FixedPreMatchSetupSource {
+        fn verify_pre_match_setup(&mut self) -> Result<(), PreMatchSetupError> {
+            match &self.0 {
+                Ok(()) => Ok(()),
+                Err(_) => Err(PreMatchSetupError::Cs2ManifestMissing),
+            }
+        }
+    }
+
     impl Cs2ProcessSource for FixedCs2Source {
         fn cs2_is_running(&mut self) -> Result<bool, ProcessObservationError> {
             match &self.0 {
@@ -227,6 +273,24 @@ mod tests {
             observation.health,
             DetectionHealth::Cs2ObservationUnavailable
         );
+    }
+
+    #[test]
+    fn pre_match_status_is_not_a_persistent_authorization() {
+        let mut source = FixedPreMatchSetupSource(Ok(()));
+        assert!(matches!(
+            pre_match_setup_status(&mut source),
+            Ok(PreMatchSetupStatus::VerifiedForCurrentCheck)
+        ));
+    }
+
+    #[test]
+    fn pre_match_setup_failure_is_propagated() {
+        let mut source = FixedPreMatchSetupSource(Err(PreMatchSetupError::Cs2ManifestMissing));
+        assert!(matches!(
+            pre_match_setup_status(&mut source),
+            Err(PreMatchSetupError::Cs2ManifestMissing)
+        ));
     }
 
     #[test]

@@ -46,6 +46,10 @@ running desktop assistant:
     pre-match handoff: verified FACEIT client, Chrome opening `faceit.com`
     without authentication, then Steam app 730. It has no executor, so this is
     a validated intent rather than an external action.
+12. `--pre-match-setup-self-check` performs a native, read-only local identity
+    check for the fixed FACEIT client and registered service, Chrome, Steam,
+    and app 730. It does not start any component and is not a compatibility
+    certification or reusable execution grant.
 
 ## Explicitly not implemented
 
@@ -59,9 +63,7 @@ running desktop assistant:
 
 ## Next milestone
 
-Implement explicit local setup verification for the FACEIT client/service,
-Chrome, and Steam identities, then add the narrow pre-match executor with a
-fresh confirmation and re-verification immediately before each step. After
-that, add ordinary process/service lifecycle subscriptions plus startup
-reconciliation. Keep detection fail-closed and do not add a general
-executable- or PID-based API.
+Add the narrow pre-match executor with a fresh confirmation and re-verification
+immediately before each step. Then add ordinary process/service lifecycle
+subscriptions plus startup reconciliation. Keep detection fail-closed and do
+not add a general executable- or PID-based API.
