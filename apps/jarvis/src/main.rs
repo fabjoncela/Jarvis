@@ -445,9 +445,9 @@ fn start_supervisor_control_pipe(
         .map_err(|_| "supervisor control thread stopped during startup".to_owned())?
 }
 
-fn monitor_cycle(
+fn monitor_cycle<S: jarvis_gaming::TriggerSnapshotSource>(
     supervisor: &mut Supervisor,
-    detector: &mut FailClosedTriggerDetector<WindowsCompetitiveActivitySource>,
+    detector: &mut FailClosedTriggerDetector<S>,
     last_report: &mut Option<(
         TriggerSnapshot,
         DetectionHealth,
@@ -494,10 +494,10 @@ fn monitor_cycle(
     Ok(observation)
 }
 
-fn handle_control_request(
+fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
     command: SupervisorControlCommand,
     supervisor: &mut Supervisor,
-    detector: &mut FailClosedTriggerDetector<WindowsCompetitiveActivitySource>,
+    detector: &mut FailClosedTriggerDetector<S>,
     last_report: &mut Option<(
         TriggerSnapshot,
         DetectionHealth,
@@ -536,9 +536,10 @@ fn handle_control_request(
             let after = monitor_cycle(supervisor, detector, last_report)?;
             let final_status = supervisor.status().map_err(|error| error.to_string())?;
             Ok(format!(
-                "OK HANDOFF FACEIT={} CHROME={} STEAM={} PROFILE={:?} DETECTION={:?}",
+                "OK HANDOFF FACEIT={} CHROME_URL_REQUESTED={} FACEIT_TITLE_MATCH={} STEAM={} PROFILE={:?} DETECTION={:?}",
                 report.faceit_ac_launcher_started,
                 report.chrome_faceit_url_requested,
+                report.chrome_faceit_title_match_detected,
                 report.steam_cs2_launch_requested,
                 final_status.profile,
                 after.health,
@@ -670,9 +671,77 @@ fn config_directory() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    struct SequenceSnapshotSource(VecDeque<Result<TriggerSnapshot, DetectionHealth>>);
+
+    impl jarvis_gaming::TriggerSnapshotSource for SequenceSnapshotSource {
+        fn observe_trigger_snapshot(&mut self) -> Result<TriggerSnapshot, DetectionHealth> {
+            self.0
+                .pop_front()
+                .expect("test fixture must provide a snapshot for every monitor cycle")
+        }
+    }
 
     fn test_config_directory() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
+    }
+
+    #[test]
+    fn monitor_cycles_fail_closed_and_restore_only_after_all_fixture_triggers_clear() {
+        let clear = TriggerSnapshot::default();
+        let faceit = TriggerSnapshot {
+            verified_faceit_process_running: true,
+            ..TriggerSnapshot::default()
+        };
+        let faceit_and_cs2 = TriggerSnapshot {
+            cs2_running: true,
+            verified_faceit_process_running: true,
+            ..TriggerSnapshot::default()
+        };
+        let cs2 = TriggerSnapshot {
+            cs2_running: true,
+            ..TriggerSnapshot::default()
+        };
+        let faceit_service = TriggerSnapshot {
+            verified_faceit_service_active: true,
+            ..TriggerSnapshot::default()
+        };
+        let fixture_snapshots = [clear, faceit, faceit_and_cs2, cs2, faceit_service, clear];
+        let fixture_results = fixture_snapshots.into_iter().map(Ok).collect();
+        let mut detector = FailClosedTriggerDetector::new(SequenceSnapshotSource(fixture_results));
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and the empty Job Object should initialize");
+        let mut last_report = None;
+        let expected_profiles = [
+            Profile::GodMode,
+            Profile::Competitive,
+            Profile::Competitive,
+            Profile::Competitive,
+            Profile::Competitive,
+            Profile::GodMode,
+        ];
+
+        for (fixture, expected_profile) in fixture_snapshots.into_iter().zip(expected_profiles) {
+            let observation = monitor_cycle(&mut supervisor, &mut detector, &mut last_report)
+                .expect("synthetic monitor cycle should reconcile without external processes");
+            let status = supervisor.status().expect("query fixture profile state");
+
+            assert!(observation.snapshot.detection_healthy);
+            assert_eq!(
+                observation.snapshot.any_automatic_trigger_active(),
+                fixture.any_automatic_trigger_active()
+            );
+            assert_eq!(status.profile, expected_profile);
+            assert_eq!(
+                status.action_gate_open,
+                expected_profile == Profile::GodMode
+            );
+            assert_eq!(
+                status.worker_start_gate_open,
+                expected_profile == Profile::GodMode
+            );
+        }
     }
 
     #[test]

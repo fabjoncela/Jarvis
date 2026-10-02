@@ -101,7 +101,65 @@ component, or service. No dedicated CPU-load benchmark was captured.
   unmeasured; synthetic policy tests do not replace that measurement.
 
 The measured polling cadence gives no evidence that native event subscriptions
-are currently necessary. The next milestone is controlled trigger-transition
-testing using isolated fixtures, without interacting with game memory or
-anti-cheat internals. Keep startup reconciliation and fail-closed behavior
-authoritative, and do not add a general executable- or PID-based API.
+are currently necessary. The controlled fixture result below verifies policy
+transitions but does not establish live OS detection latency. Keep startup
+reconciliation and fail-closed behavior authoritative, and do not add a
+general executable- or PID-based API.
+
+## Controlled transition fixture result
+
+`apps/jarvis/src/main.rs::monitor_cycles_fail_closed_and_restore_only_after_all_fixture_triggers_clear`
+now feeds synthetic healthy snapshots through the same monitor reconciliation
+cycle used by the resident monitor. It covers a clear baseline, FACEIT launcher
+activation, overlapping FACEIT/CS2 activity, CS2 remaining after FACEIT exits,
+service-only activity, and a final fully clear snapshot. The test verifies both
+policy gates remain closed for every active trigger and reopen only after all
+triggers clear. It uses no real process/service changes and does not measure
+live OS event-to-detection latency.
+
+## Live preflight result (2 October 2026)
+
+The native setup self-check verified the fixed FACEIT launcher and registered
+service identities, Chrome and Steam installations, and the Steam CS2 app 730
+manifest. It started no application or service. At the same time, the observed
+session had the FACEIT launcher running, `FACEITService` stopped, and CS2 absent.
+The one-cycle detector and resident supervisor both reported healthy detection,
+entered stable Competitive Mode because the verified FACEIT launcher was
+active, and kept the worker-start gate closed. The resident monitor was stopped
+after its status check. No FACEIT, Chrome, Steam, or CS2 process was changed.
+
+## Live transition smoke result (2 October 2026, partial)
+
+With the resident monitor active, force-closing the exact verified FACEIT
+launcher process produced a healthy transition to stable God Mode with both
+gates open. The fixed `--prepare-faceit-cs2` handoff then completed with
+`FACEIT=true CHROME=true STEAM=true`, healthy detection, and Competitive Mode.
+The Chrome window title showed the FACEIT site; no page controls or credentials
+were entered.
+
+After force-closing all verified Google Chrome processes and the exact FACEIT
+launcher process, `FACEITService` remained stopped and untouched. Steam's CS2
+process remained active. Jarvis correctly stayed in stable Competitive Mode
+with both gates closed from the CS2 trigger alone. Chrome is not a profile
+trigger; the FACEIT launcher and service are independently observed triggers.
+
+The live CS2 exit transition was not observed directly. At a later follow-up,
+`--supervisor-status` reported a healthy stable God Mode snapshot with CS2,
+FACEIT launcher, and FACEIT service all inactive. This confirms the final
+all-clear state, but not the exact transition timing or in-game state at exit.
+Jarvis continues to observe `FACEITService` read-only and does not stop it.
+
+## One-time Chrome FACEIT title check
+
+The fixed Chrome step now makes one best-effort pass over visible top-level
+Chrome windows. It counts only windows owned by the locally verified Chrome
+binary and whose title starts with a recognized FACEIT marker. A match skips
+the Chrome URL launch; no match or an unavailable/ambiguous check preserves the
+existing fixed URL launch. Handoff output distinguishes `CHROME_URL_REQUESTED`
+from `FACEIT_TITLE_MATCH` so a title match is not reported as a verified URL.
+
+This is a convenience heuristic, not a URL or tab verifier: it can miss a
+FACEIT background tab or a title without the marker, and it does not inspect
+page contents. It runs only during the explicit handoff, with no polling,
+extension, or remote-debugging endpoint. Unit tests cover title matching,
+unknown-state fallback, accurate reporting, and continuing to the Steam step.

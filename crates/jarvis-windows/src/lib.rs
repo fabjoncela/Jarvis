@@ -19,7 +19,7 @@ use jarvis_core::ProfileGeneration;
 use jarvis_profiles::GateError;
 use jarvis_windows_ffi::{
     launch_verified_pre_match_step, FixedInternalWorker, InternalWorkerIdentity, KillOnCloseJob,
-    RunningInternalWorker,
+    PreMatchLaunchOutcome, RunningInternalWorker,
 };
 pub use jarvis_windows_ffi::{
     observe_competitive_activity, observe_cs2_processes, send_supervisor_control_request,
@@ -34,6 +34,7 @@ pub use jarvis_windows_ffi::{
 pub struct PreMatchHandoffReport {
     pub faceit_ac_launcher_started: bool,
     pub chrome_faceit_url_requested: bool,
+    pub chrome_faceit_title_match_detected: bool,
     pub steam_cs2_launch_requested: bool,
 }
 
@@ -42,14 +43,20 @@ impl PreMatchHandoffReport {
         Self {
             faceit_ac_launcher_started: false,
             chrome_faceit_url_requested: false,
+            chrome_faceit_title_match_detected: false,
             steam_cs2_launch_requested: false,
         }
     }
 
-    fn record(&mut self, step: PreMatchLaunchStep) {
+    fn record(&mut self, step: PreMatchLaunchStep, outcome: PreMatchLaunchOutcome) {
         match step {
             PreMatchLaunchStep::FaceitAcLauncher => self.faceit_ac_launcher_started = true,
-            PreMatchLaunchStep::ChromeFaceitWebsite => self.chrome_faceit_url_requested = true,
+            PreMatchLaunchStep::ChromeFaceitWebsite => match outcome {
+                PreMatchLaunchOutcome::Started => self.chrome_faceit_url_requested = true,
+                PreMatchLaunchOutcome::FaceitTitleMatchDetected => {
+                    self.chrome_faceit_title_match_detected = true;
+                }
+            },
             PreMatchLaunchStep::SteamCs2 => self.steam_cs2_launch_requested = true,
         }
     }
@@ -107,7 +114,7 @@ pub fn run_pre_match_handoff(
 
 fn run_pre_match_sequence(
     mut authorize_step: impl FnMut() -> Result<(), GateError>,
-    mut launch_step: impl FnMut(PreMatchLaunchStep) -> Result<(), String>,
+    mut launch_step: impl FnMut(PreMatchLaunchStep) -> Result<PreMatchLaunchOutcome, String>,
 ) -> Result<PreMatchHandoffReport, PreMatchHandoffError> {
     let mut report = PreMatchHandoffReport::empty();
     for step in [
@@ -120,14 +127,12 @@ fn run_pre_match_sequence(
             completed: report,
             source,
         })?;
-        if let Err(source) = launch_step(step) {
-            return Err(PreMatchHandoffError::Launch {
-                step,
-                completed: report,
-                source,
-            });
-        }
-        report.record(step);
+        let outcome = launch_step(step).map_err(|source| PreMatchHandoffError::Launch {
+            step,
+            completed: report,
+            source,
+        })?;
+        report.record(step, outcome);
     }
     Ok(report)
 }
@@ -663,7 +668,7 @@ mod tests {
             },
             |step| {
                 started.push(step);
-                Ok(())
+                Ok(PreMatchLaunchOutcome::Started)
             },
         )
         .expect("all fixed steps should pass the mock admission and launcher");
@@ -679,6 +684,42 @@ mod tests {
         assert_eq!(authorization_checks, 3);
         assert!(report.faceit_ac_launcher_started);
         assert!(report.chrome_faceit_url_requested);
+        assert!(!report.chrome_faceit_title_match_detected);
+        assert!(report.steam_cs2_launch_requested);
+    }
+
+    #[test]
+    fn faceit_title_match_is_reported_and_does_not_stop_steam_handoff() {
+        let mut started = Vec::new();
+        let mut authorization_checks = 0;
+        let report = run_pre_match_sequence(
+            || {
+                authorization_checks += 1;
+                Ok(())
+            },
+            |step| {
+                started.push(step);
+                Ok(if step == PreMatchLaunchStep::ChromeFaceitWebsite {
+                    PreMatchLaunchOutcome::FaceitTitleMatchDetected
+                } else {
+                    PreMatchLaunchOutcome::Started
+                })
+            },
+        )
+        .expect("a FACEIT title match should satisfy the Chrome step");
+
+        assert_eq!(authorization_checks, 3);
+        assert_eq!(
+            started,
+            vec![
+                PreMatchLaunchStep::FaceitAcLauncher,
+                PreMatchLaunchStep::ChromeFaceitWebsite,
+                PreMatchLaunchStep::SteamCs2,
+            ]
+        );
+        assert!(report.faceit_ac_launcher_started);
+        assert!(!report.chrome_faceit_url_requested);
+        assert!(report.chrome_faceit_title_match_detected);
         assert!(report.steam_cs2_launch_requested);
     }
 
@@ -692,7 +733,7 @@ mod tests {
                 if step == PreMatchLaunchStep::ChromeFaceitWebsite {
                     Err("mock Chrome start failure".to_owned())
                 } else {
-                    Ok(())
+                    Ok(PreMatchLaunchOutcome::Started)
                 }
             },
         );
@@ -704,6 +745,7 @@ mod tests {
                 completed: PreMatchHandoffReport {
                     faceit_ac_launcher_started: true,
                     chrome_faceit_url_requested: false,
+                    chrome_faceit_title_match_detected: false,
                     steam_cs2_launch_requested: false,
                 },
                 source: "mock Chrome start failure".to_owned(),
@@ -733,7 +775,7 @@ mod tests {
             },
             |step| {
                 started.push(step);
-                Ok(())
+                Ok(PreMatchLaunchOutcome::Started)
             },
         );
 
@@ -744,6 +786,7 @@ mod tests {
                 completed: PreMatchHandoffReport {
                     faceit_ac_launcher_started: true,
                     chrome_faceit_url_requested: false,
+                    chrome_faceit_title_match_detected: false,
                     steam_cs2_launch_requested: false,
                 },
                 source: GateError::StaleGeneration,

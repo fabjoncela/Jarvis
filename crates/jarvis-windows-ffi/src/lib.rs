@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER,
-    ERROR_NO_MORE_FILES, FILETIME, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::WinTrust::{
     WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
@@ -57,6 +57,9 @@ use windows_sys::Win32::System::Threading::{
     GetProcessTimes, OpenEventW, OpenProcess, QueryFullProcessImageNameW, ResumeThread, SetEvent,
     TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
     PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
 };
 
 /// A Win32 call failed. Error codes are retained for local diagnostics without
@@ -232,6 +235,14 @@ pub enum PreMatchLaunchStep {
     FaceitAcLauncher,
     ChromeFaceitWebsite,
     SteamCs2,
+}
+
+/// Describes whether a fixed pre-match target was started or a FACEIT-like
+/// title was detected in a verified Chrome window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreMatchLaunchOutcome {
+    Started,
+    FaceitTitleMatchDetected,
 }
 
 impl PreMatchLaunchStep {
@@ -446,14 +457,142 @@ pub fn observe_competitive_activity(
 /// Launches one of the three fixed pre-match targets after repeating the
 /// complete local setup verification. This does not start `FACEITService`
 /// directly, handle authentication, or accept any dynamic command line.
-pub fn launch_verified_pre_match_step(step: PreMatchLaunchStep) -> Result<(), PreMatchLaunchError> {
+pub fn launch_verified_pre_match_step(
+    step: PreMatchLaunchStep,
+) -> Result<PreMatchLaunchOutcome, PreMatchLaunchError> {
     let setup = verify_default_pre_match_setup().map_err(PreMatchLaunchError::Setup)?;
     let executable = match step {
         PreMatchLaunchStep::FaceitAcLauncher => &setup.faceit_ac_launcher,
         PreMatchLaunchStep::ChromeFaceitWebsite => &setup.chrome,
         PreMatchLaunchStep::SteamCs2 => &setup.steam,
     };
-    start_fixed_pre_match_process(executable, step)
+    if step == PreMatchLaunchStep::ChromeFaceitWebsite
+        && should_skip_chrome_launch(detect_faceit_title_in_verified_chrome(executable))
+    {
+        return Ok(PreMatchLaunchOutcome::FaceitTitleMatchDetected);
+    }
+    start_fixed_pre_match_process(executable, step).map(|()| PreMatchLaunchOutcome::Started)
+}
+
+struct ChromeWindowScan<'a> {
+    expected_image: &'a Path,
+    faceit_title_match_found: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FaceitTitleDetection {
+    Match,
+    NoMatch,
+    Unknown,
+}
+
+fn detect_faceit_title_in_verified_chrome(expected_image: &Path) -> FaceitTitleDetection {
+    let mut scan = ChromeWindowScan {
+        expected_image,
+        faceit_title_match_found: false,
+    };
+    // SAFETY: `scan` remains live for the synchronous EnumWindows call. The
+    // callback only reads its fixed verified image path and writes its result.
+    let enumeration_succeeded = unsafe {
+        EnumWindows(
+            Some(inspect_visible_chrome_window),
+            (&mut scan as *mut ChromeWindowScan<'_>) as LPARAM,
+        )
+    };
+    if scan.faceit_title_match_found {
+        FaceitTitleDetection::Match
+    } else if enumeration_succeeded != 0 {
+        FaceitTitleDetection::NoMatch
+    } else {
+        // Enumeration failure is not evidence of an existing page. Individual
+        // query failures likewise never create a positive match in the callback.
+        FaceitTitleDetection::Unknown
+    }
+}
+
+fn should_skip_chrome_launch(detection: FaceitTitleDetection) -> bool {
+    detection == FaceitTitleDetection::Match
+}
+
+unsafe extern "system" fn inspect_visible_chrome_window(hwnd: HWND, context: LPARAM) -> i32 {
+    if context == 0 {
+        return 1;
+    }
+    // SAFETY: EnumWindows supplied this HWND for the current synchronous
+    // callback; IsWindowVisible only queries its visibility state.
+    if unsafe { IsWindowVisible(hwnd) } == 0 {
+        return 1;
+    }
+
+    // SAFETY: EnumWindows synchronously returns the exact non-null pointer
+    // passed as LPARAM by `detect_faceit_title_in_verified_chrome`.
+    let scan = unsafe { &mut *(context as *mut ChromeWindowScan<'_>) };
+    let mut class_name = [0_u16; 256];
+    // SAFETY: `class_name` is writable for the entire bounded buffer length.
+    let class_length =
+        unsafe { GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32) };
+    if class_length <= 0
+        || String::from_utf16_lossy(&class_name[..class_length as usize]) != "Chrome_WidgetWin_1"
+    {
+        return 1;
+    }
+
+    let mut process_id = 0;
+    // SAFETY: `process_id` is a valid writable output for this synchronous
+    // window-owner query.
+    if unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) } == 0
+        || process_id == 0
+        || !window_process_matches_image(process_id, scan.expected_image)
+    {
+        return 1;
+    }
+
+    let mut title = [0_u16; 2048];
+    // SAFETY: `title` is writable for the entire bounded buffer length.
+    let title_length = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+    if title_length > 0
+        && title_has_faceit_site_marker(&String::from_utf16_lossy(&title[..title_length as usize]))
+    {
+        scan.faceit_title_match_found = true;
+        return 0;
+    }
+    1
+}
+
+fn window_process_matches_image(process_id: u32, expected_image: &Path) -> bool {
+    // SAFETY: This requests only limited query access to the process that owns
+    // a visible Chrome-class window; it does not read memory or alter it.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return false;
+    }
+
+    let mut image = vec![0_u16; 32_768];
+    let mut length = image.len() as u32;
+    // SAFETY: `process` is a live limited-query handle and `image` is a
+    // writable UTF-16 buffer for this synchronous API call.
+    let queried =
+        unsafe { QueryFullProcessImageNameW(process, 0, image.as_mut_ptr(), &mut length) };
+    // SAFETY: This function owns the process handle and no longer uses it.
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    if queried == 0 || length as usize > image.len() {
+        return false;
+    }
+
+    let image = PathBuf::from(std::ffi::OsString::from_wide(&image[..length as usize]));
+    image
+        .canonicalize()
+        .is_ok_and(|actual| same_windows_path(expected_image, &actual))
+}
+
+fn title_has_faceit_site_marker(title: &str) -> bool {
+    let title = title.trim().to_ascii_lowercase();
+    title == "faceit"
+        || ["faceit -", "faceit |", "faceit:", "faceit –", "faceit —"]
+            .iter()
+            .any(|prefix| title.starts_with(prefix))
 }
 
 fn start_fixed_pre_match_process(
@@ -1677,6 +1816,24 @@ mod tests {
             PreMatchLaunchStep::SteamCs2.command_line(),
             "steam.exe -applaunch 730"
         );
+    }
+
+    #[test]
+    fn faceit_window_title_match_is_case_insensitive_and_unknown_titles_do_not_match() {
+        assert!(title_has_faceit_site_marker("FACEIT - Google Chrome"));
+        assert!(title_has_faceit_site_marker("faceit"));
+        assert!(!title_has_faceit_site_marker("Steam Community"));
+        assert!(!title_has_faceit_site_marker(
+            "How FACEIT matchmaking works"
+        ));
+        assert!(!title_has_faceit_site_marker(""));
+    }
+
+    #[test]
+    fn chrome_launch_is_skipped_only_for_a_clear_faceit_window_detection() {
+        assert!(should_skip_chrome_launch(FaceitTitleDetection::Match));
+        assert!(!should_skip_chrome_launch(FaceitTitleDetection::NoMatch));
+        assert!(!should_skip_chrome_launch(FaceitTitleDetection::Unknown));
     }
 
     #[test]
