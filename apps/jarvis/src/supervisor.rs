@@ -1,9 +1,8 @@
 //! Serialized supervisor foundation with one fixed pre-match capability.
 //!
 //! `Supervisor` is the sole owner of profile state, configured routing, action
-//! validation, the fixed internal-worker manifest, and an empty owned Job
-//! Object. It has no event loop yet, so each current CLI invocation creates it
-//! for validation and drops it before exit.
+//! validation, the fixed internal-worker manifest, and an owned Job Object.
+//! CLI monitor iterations reconcile through this serialized owner.
 
 use std::error::Error;
 use std::fmt;
@@ -12,10 +11,10 @@ use std::path::Path;
 use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, ValidationError};
 use jarvis_config::{ConfigError, FaceitSetupStatus, ValidatedConfiguration};
 use jarvis_core::{ProfileGeneration, RequestContext, RequestId};
-use jarvis_gaming::{ensure_cs2_not_running, WindowsCs2ProcessSource};
+use jarvis_gaming::{ensure_cs2_not_running, TriggerObservation, WindowsCs2ProcessSource};
 use jarvis_profiles::{
-    GateError, Profile, ProfileController, ShutdownVerification, TransitionCause, TransitionStart,
-    TransitionState,
+    GateError, Profile, ProfileController, RestoreError, ShutdownVerification, TransitionCause,
+    TransitionStart, TransitionState,
 };
 use jarvis_router::{RouteResult, Router};
 use jarvis_windows::{
@@ -162,6 +161,18 @@ pub struct CompetitiveEntryResult {
     pub used_forced_termination: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivityReconciliation {
+    EnteredCompetitive {
+        cause: TransitionCause,
+        clean_shutdown: bool,
+    },
+    RestoredGodMode,
+    RemainsRestricted,
+    RestoreDenied(RestoreError),
+    Unchanged,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RouteOutcome {
     Validated(ValidatedPlan),
@@ -171,9 +182,8 @@ pub enum RouteOutcome {
 
 /// The one authoritative mutable owner for a future long-lived Jarvis process.
 ///
-/// All request admission takes `&mut self`, making the serialized ownership
-/// explicit even though the current CLI does not yet run a resident event loop
-/// or process monitor. Its only external application capability is the
+/// All request admission takes `&mut self`, keeping policy and monitor
+/// reconciliation serialized. Its only external application capability is the
 /// explicit fixed pre-match handoff.
 pub struct Supervisor {
     configuration: ValidatedConfiguration,
@@ -357,6 +367,45 @@ impl Supervisor {
             }
         }
     }
+
+    /// Applies a startup or polling snapshot to the supervisor-owned profile.
+    /// Any active trigger or unhealthy observation closes both gates before
+    /// workers are asked to stop. God Mode is restored only after a healthy
+    /// snapshot reports that every fixed trigger has cleared.
+    pub fn reconcile_activity(
+        &mut self,
+        observation: TriggerObservation,
+    ) -> Result<ActivityReconciliation, CompetitiveEntryError> {
+        let snapshot = observation.snapshot;
+        let cause = snapshot.first_cause().or_else(|| {
+            (!snapshot.detection_healthy).then_some(TransitionCause::DetectionUnhealthy)
+        });
+
+        if let Some(cause) = cause {
+            if self.controller.profile() == Profile::Competitive {
+                return Ok(ActivityReconciliation::RemainsRestricted);
+            }
+            let entry = self.enter_competitive(cause)?;
+            return Ok(ActivityReconciliation::EnteredCompetitive {
+                cause,
+                clean_shutdown: entry.clean_shutdown,
+            });
+        }
+
+        if self.controller.profile() == Profile::Competitive {
+            return Ok(
+                match self.controller.restore_god_mode(
+                    snapshot.any_automatic_trigger_active(),
+                    snapshot.detection_healthy,
+                ) {
+                    Ok(()) => ActivityReconciliation::RestoredGodMode,
+                    Err(error) => ActivityReconciliation::RestoreDenied(error),
+                },
+            );
+        }
+
+        Ok(ActivityReconciliation::Unchanged)
+    }
 }
 
 #[cfg(test)]
@@ -450,5 +499,116 @@ mod tests {
             supervisor.start_internal_worker(InternalWorker::Session, Path::new("does-not-exist")),
             Err(WorkerStartError::ProfileGate(GateError::ProfileRestricted))
         ));
+    }
+
+    #[test]
+    fn startup_reconciliation_enters_competitive_for_verified_faceit_service() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        let observation = TriggerObservation {
+            snapshot: jarvis_gaming::TriggerSnapshot {
+                verified_faceit_service_active: true,
+                detection_healthy: true,
+                ..jarvis_gaming::TriggerSnapshot::default()
+            },
+            health: jarvis_gaming::DetectionHealth::Healthy,
+        };
+
+        assert_eq!(
+            supervisor
+                .reconcile_activity(observation)
+                .expect("empty worker job should shut down cleanly"),
+            ActivityReconciliation::EnteredCompetitive {
+                cause: TransitionCause::FaceitService,
+                clean_shutdown: true,
+            }
+        );
+        let status = supervisor.status().expect("query reconciled profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
+    }
+
+    #[test]
+    fn startup_reconciliation_enters_competitive_when_detection_is_unhealthy() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        let observation = TriggerObservation {
+            snapshot: jarvis_gaming::TriggerSnapshot::default(),
+            health: jarvis_gaming::DetectionHealth::FaceitSetupUnverified,
+        };
+
+        assert_eq!(
+            supervisor
+                .reconcile_activity(observation)
+                .expect("empty worker job should shut down cleanly"),
+            ActivityReconciliation::EnteredCompetitive {
+                cause: TransitionCause::DetectionUnhealthy,
+                clean_shutdown: true,
+            }
+        );
+        let status = supervisor.status().expect("query reconciled profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
+    }
+
+    #[test]
+    fn healthy_reconciliation_restores_only_after_all_triggers_clear() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        let active = TriggerObservation {
+            snapshot: jarvis_gaming::TriggerSnapshot {
+                cs2_running: true,
+                detection_healthy: true,
+                ..jarvis_gaming::TriggerSnapshot::default()
+            },
+            health: jarvis_gaming::DetectionHealth::Healthy,
+        };
+        let clear = TriggerObservation {
+            snapshot: jarvis_gaming::TriggerSnapshot {
+                detection_healthy: true,
+                ..jarvis_gaming::TriggerSnapshot::default()
+            },
+            health: jarvis_gaming::DetectionHealth::Healthy,
+        };
+
+        supervisor
+            .reconcile_activity(active)
+            .expect("active CS2 must enter Competitive Mode");
+        assert_eq!(
+            supervisor
+                .reconcile_activity(clear)
+                .expect("healthy clear snapshot should restore God Mode"),
+            ActivityReconciliation::RestoredGodMode
+        );
+        let status = supervisor.status().expect("query restored profile");
+        assert_eq!(status.profile, Profile::GodMode);
+        assert!(status.action_gate_open);
+        assert!(status.worker_start_gate_open);
+    }
+
+    #[test]
+    fn unhealthy_reconciliation_never_restores_competitive_mode() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        supervisor
+            .enter_competitive(TransitionCause::DetectionUnhealthy)
+            .expect("empty worker job should shut down cleanly");
+        let unhealthy_clear = TriggerObservation {
+            snapshot: jarvis_gaming::TriggerSnapshot::default(),
+            health: jarvis_gaming::DetectionHealth::ActivityObservationUnavailable,
+        };
+
+        assert_eq!(
+            supervisor
+                .reconcile_activity(unhealthy_clear)
+                .expect("unhealthy observation remains restricted"),
+            ActivityReconciliation::RemainsRestricted
+        );
+        let status = supervisor.status().expect("query restricted profile");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
     }
 }

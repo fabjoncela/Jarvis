@@ -9,9 +9,9 @@ pre-match launch sequence, not a running desktop assistant:
    tokens.
 2. `apps/jarvis::Supervisor` is the sole mutable owner of configuration,
    profile policy, deterministic routing, action validation, the fixed worker
-   manifest, and an owned Job Object for a single CLI invocation.
-   `--serve-stdin` can keep that same serialized owner alive for the explicit
-   `status`, `route <command>`, and `quit` console protocol.
+   manifest, and its owned Job Object. `--monitor-competitive` keeps the
+   authoritative owner alive; `--serve-stdin` remains a separate validation-
+   only process-local console.
 3. `jarvis-profiles` owns God Mode/Competitive Mode transitions and the action
    and worker-start gates.
 4. `jarvis-config` validates the fixed TOML bundle all-or-nothing and rejects unknown
@@ -35,10 +35,10 @@ pre-match launch sequence, not a running desktop assistant:
    and permits restart only after that verified empty state. It exposes no API
    to open or adopt a PID, or launch a user-supplied executable.
 9. `jarvis-gaming` models competitive transitions against testable in-memory
-   lifecycle boundaries. It also has a read-only, fixed-name `cs2.exe` Tool
-   Help snapshot source that records PID plus creation-time identity. Its
-   detector fails closed when that snapshot is unavailable or when FACEIT setup
-   remains unverified.
+   lifecycle boundaries. Its native source reconciles `cs2.exe`, the exact
+   verified `faceitclient.exe` path, and `FACEITService` status/binary identity.
+   Target process identity uses limited query access, PID, creation time, and an
+   exact canonical FACEIT image path; no process memory or command line is read.
 10. The supervisor can enter Competitive Mode through the real fixed-worker
     manager: it closes both gates first, verifies its owned Job Object is empty,
     and records a restricted fault if containment cannot be verified.
@@ -52,22 +52,36 @@ pre-match launch sequence, not a running desktop assistant:
     check for the fixed FACEIT Anti-Cheat Launcher and registered service,
     Chrome, Steam, and app 730. It does not start any component and is not a
     compatibility certification or reusable execution grant.
+13. `--monitor-competitive` performs startup reconciliation, then polls fixed
+    process/service snapshots every 500 ms. It rechecks signed setup identities
+    every 30 seconds (every 5 seconds when unverified), closes both gates on an
+    active trigger or unhealthy observation, and restores God Mode only from a
+    healthy snapshot with no active triggers. `--detection-self-check` runs one
+    reconciliation cycle and exits. For the current Windows account, the
+    monitor owns one exclusive, owner-only local named pipe with a fixed
+    protocol (`STATUS`, `PREPARE_FACEIT_CS2`, and `WORKER_SELF_CHECK`). It
+    rejects remote clients and validates the connected client's executable
+    path. The handoff and worker-start CLI commands require this authority and
+    are serialized on the same owner; they fail closed if it is absent or its
+    policy gates are closed. `--supervisor-status` queries its latest
+    reconciled status. Other Windows accounts are unsupported by this endpoint.
 
 ## Explicitly not implemented
 
-- general worker IPC, a multi-worker lifecycle, or any worker capability beyond
+- any worker capability beyond
   the fixed session worker's cooperative exit event
-- a Windows service, process/service event subscriptions, or FACEIT process or
-  service identity verification
+- an installed Windows service, automatic startup, or native OS process/service event subscriptions
+- process monitoring faster than the 500 ms poll interval
 - general desktop application, audio, browser, file, service, or system action
   execution; only the fixed confirmation-gated pre-match sequence can launch
   the FACEIT AC launcher, Chrome, and Steam app 730
-- SQLite, IPC, tray UI, microphone, STT, TTS, Qwen, or learning
-- any CS2/FACEIT interaction beyond abstract trigger names used in tests
+- SQLite, general-purpose IPC, tray UI, microphone, STT, TTS, Qwen, or learning
 
 ## Next milestone
 
-Add ordinary process/service lifecycle subscriptions plus startup
-reconciliation, and connect verified FACEIT setup to the fail-closed detector.
-Keep detection fail-closed and do not add a general executable- or PID-based
-API.
+Measure monitor poll and client-admission latency under normal load, and record
+false-positive/false-negative cases without interacting with game memory or
+anti-cheat internals. Add native process/service event subscriptions only if
+the fixed 500 ms polling interval proves insufficient. Keep startup
+reconciliation and fail-closed behavior authoritative; do not add a general
+executable- or PID-based API.

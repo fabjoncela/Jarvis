@@ -22,9 +22,12 @@ use jarvis_windows_ffi::{
     RunningInternalWorker,
 };
 pub use jarvis_windows_ffi::{
-    observe_cs2_processes, verify_default_pre_match_setup, FixedCompetitiveProcess,
-    ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError,
-    ProcessObservationError, VerifiedPreMatchSetup, Win32Error, WorkerLaunchError,
+    observe_competitive_activity, observe_cs2_processes, send_supervisor_control_request,
+    verify_default_pre_match_setup, CompetitiveActivityObservationError,
+    CompetitiveActivitySnapshot, FixedCompetitiveProcess, ObservedProcessIdentity,
+    PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError, ProcessObservationError,
+    SupervisorControlCommand, SupervisorControlPipeError, SupervisorControlPipeServer,
+    VerifiedPreMatchSetup, Win32Error, WorkerLaunchError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

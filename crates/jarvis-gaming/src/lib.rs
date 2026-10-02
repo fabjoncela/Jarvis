@@ -1,15 +1,19 @@
 #![forbid(unsafe_code)]
 
-//! Competitive-mode orchestration. Trigger observations are abstract so this
-//! crate can be tested without looking into a game or anti-cheat process.
+//! Competitive-mode orchestration. Policy tests use abstract snapshots; the
+//! native source reads only fixed process identity and service status, never
+//! game memory or anti-cheat internals.
+
+use std::time::{Duration, Instant};
 
 use jarvis_profiles::{
     ProfileController, RestoreError, ShutdownVerification, TransitionCause, TransitionStart,
     TransitionState,
 };
 use jarvis_windows::{
-    observe_cs2_processes, verify_default_pre_match_setup, PreMatchSetupError,
-    ProcessObservationError, WorkerLifecycle, WorkerState,
+    observe_competitive_activity, observe_cs2_processes, verify_default_pre_match_setup,
+    CompetitiveActivitySnapshot, PreMatchSetupError, ProcessObservationError,
+    VerifiedPreMatchSetup, WorkerLifecycle, WorkerState,
 };
 
 /// Read-only setup check for the three fixed pre-match launch targets. The
@@ -109,7 +113,7 @@ impl Cs2ProcessSource for WindowsCs2ProcessSource {
 pub enum DetectionHealth {
     Healthy,
     FaceitSetupUnverified,
-    Cs2ObservationUnavailable,
+    ActivityObservationUnavailable,
 }
 
 /// Result of one read-only trigger snapshot. Any unhealthy result has
@@ -120,49 +124,41 @@ pub struct TriggerObservation {
     pub health: DetectionHealth,
 }
 
-/// Produces fail-closed snapshots. FACEIT must remain unverified until setup
-/// supplies explicit locally reviewed process and service identities; it is
-/// never guessed from a vendor-like name.
+/// Fixed sources return full trigger snapshots or an explicit unhealthy
+/// result. A failed source can never be interpreted as "no trigger".
+pub trait TriggerSnapshotSource {
+    fn observe_trigger_snapshot(&mut self) -> Result<TriggerSnapshot, DetectionHealth>;
+}
+
+/// Turns source failures into an unhealthy, trigger-free snapshot. The caller
+/// must treat unhealthy as a restriction trigger rather than restore God Mode.
 pub struct FailClosedTriggerDetector<S> {
     source: S,
-    faceit_setup_verified: bool,
 }
 
 impl<S> FailClosedTriggerDetector<S> {
     #[must_use]
-    pub const fn new(source: S, faceit_setup_verified: bool) -> Self {
-        Self {
-            source,
-            faceit_setup_verified,
-        }
+    pub const fn new(source: S) -> Self {
+        Self { source }
     }
 }
 
-impl<S: Cs2ProcessSource> FailClosedTriggerDetector<S> {
+impl<S: TriggerSnapshotSource> FailClosedTriggerDetector<S> {
     pub fn observe(&mut self) -> TriggerObservation {
-        match self.source.cs2_is_running() {
-            Ok(cs2_running) if self.faceit_setup_verified => TriggerObservation {
-                snapshot: TriggerSnapshot {
-                    cs2_running,
-                    detection_healthy: true,
-                    ..TriggerSnapshot::default()
-                },
-                health: DetectionHealth::Healthy,
-            },
-            Ok(cs2_running) => TriggerObservation {
-                snapshot: TriggerSnapshot {
-                    cs2_running,
-                    detection_healthy: false,
-                    ..TriggerSnapshot::default()
-                },
-                health: DetectionHealth::FaceitSetupUnverified,
-            },
-            Err(_) => TriggerObservation {
+        match self.source.observe_trigger_snapshot() {
+            Ok(mut snapshot) => {
+                snapshot.detection_healthy = true;
+                TriggerObservation {
+                    snapshot,
+                    health: DetectionHealth::Healthy,
+                }
+            }
+            Err(health) => TriggerObservation {
                 snapshot: TriggerSnapshot {
                     detection_healthy: false,
                     ..TriggerSnapshot::default()
                 },
-                health: DetectionHealth::Cs2ObservationUnavailable,
+                health,
             },
         }
     }
@@ -174,6 +170,67 @@ pub struct TriggerSnapshot {
     pub verified_faceit_process_running: bool,
     pub verified_faceit_service_active: bool,
     pub detection_healthy: bool,
+}
+
+/// Native fixed-identity activity source. Full setup signatures are checked
+/// at startup and every 30 seconds; a failed check is retried after five
+/// seconds. Process and service state are reconciled on every polling cycle.
+pub struct WindowsCompetitiveActivitySource {
+    setup: Option<VerifiedPreMatchSetup>,
+    last_setup_check: Option<Instant>,
+}
+
+impl WindowsCompetitiveActivitySource {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            setup: None,
+            last_setup_check: None,
+        }
+    }
+
+    fn verified_setup(&mut self) -> Result<&VerifiedPreMatchSetup, DetectionHealth> {
+        let now = Instant::now();
+        let recheck_interval = if self.setup.is_some() {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(5)
+        };
+        let should_check = self
+            .last_setup_check
+            .is_none_or(|checked_at| now.duration_since(checked_at) >= recheck_interval);
+        if should_check {
+            self.last_setup_check = Some(now);
+            self.setup = verify_default_pre_match_setup().ok();
+        }
+        self.setup
+            .as_ref()
+            .ok_or(DetectionHealth::FaceitSetupUnverified)
+    }
+}
+
+impl Default for WindowsCompetitiveActivitySource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TriggerSnapshotSource for WindowsCompetitiveActivitySource {
+    fn observe_trigger_snapshot(&mut self) -> Result<TriggerSnapshot, DetectionHealth> {
+        let setup = self.verified_setup()?;
+        let observed = observe_competitive_activity(setup)
+            .map_err(|_| DetectionHealth::ActivityObservationUnavailable)?;
+        Ok(trigger_snapshot(observed))
+    }
+}
+
+fn trigger_snapshot(observed: CompetitiveActivitySnapshot) -> TriggerSnapshot {
+    TriggerSnapshot {
+        cs2_running: observed.cs2_running,
+        verified_faceit_process_running: observed.verified_faceit_process_running,
+        verified_faceit_service_active: observed.verified_faceit_service_active,
+        detection_healthy: true,
+    }
 }
 
 impl TriggerSnapshot {
@@ -270,6 +327,8 @@ mod tests {
 
     struct FixedPreMatchSetupSource(Result<(), PreMatchSetupError>);
 
+    struct FixedTriggerSnapshotSource(Result<TriggerSnapshot, DetectionHealth>);
+
     impl PreMatchSetupSource for FixedPreMatchSetupSource {
         fn verify_pre_match_setup(&mut self) -> Result<(), PreMatchSetupError> {
             match &self.0 {
@@ -290,30 +349,48 @@ mod tests {
         }
     }
 
+    impl TriggerSnapshotSource for FixedTriggerSnapshotSource {
+        fn observe_trigger_snapshot(&mut self) -> Result<TriggerSnapshot, DetectionHealth> {
+            self.0
+        }
+    }
+
     #[test]
-    fn unverified_faceit_setup_keeps_detection_unhealthy_even_when_cs2_is_seen() {
-        let mut detector = FailClosedTriggerDetector::new(FixedCs2Source(Ok(true)), false);
+    fn unverified_faceit_setup_fails_closed() {
+        let mut detector = FailClosedTriggerDetector::new(FixedTriggerSnapshotSource(Err(
+            DetectionHealth::FaceitSetupUnverified,
+        )));
         let observation = detector.observe();
-        assert!(observation.snapshot.cs2_running);
+        assert!(!observation.snapshot.any_automatic_trigger_active());
         assert!(!observation.snapshot.detection_healthy);
         assert_eq!(observation.health, DetectionHealth::FaceitSetupUnverified);
     }
 
     #[test]
-    fn unavailable_cs2_snapshot_fails_closed() {
-        let mut detector = FailClosedTriggerDetector::new(
-            FixedCs2Source(Err(ProcessObservationError::CandidateIdentityUnavailable {
-                process: FixedCompetitiveProcess::Cs2,
-            })),
-            true,
-        );
+    fn unavailable_activity_snapshot_fails_closed() {
+        let mut detector = FailClosedTriggerDetector::new(FixedTriggerSnapshotSource(Err(
+            DetectionHealth::ActivityObservationUnavailable,
+        )));
         let observation = detector.observe();
         assert!(!observation.snapshot.cs2_running);
         assert!(!observation.snapshot.detection_healthy);
         assert_eq!(
             observation.health,
-            DetectionHealth::Cs2ObservationUnavailable
+            DetectionHealth::ActivityObservationUnavailable
         );
+    }
+
+    #[test]
+    fn fixed_activity_mapping_marks_each_verified_trigger() {
+        let snapshot = trigger_snapshot(CompetitiveActivitySnapshot {
+            cs2_running: true,
+            verified_faceit_process_running: true,
+            verified_faceit_service_active: true,
+        });
+        assert!(snapshot.cs2_running);
+        assert!(snapshot.verified_faceit_process_running);
+        assert!(snapshot.verified_faceit_service_active);
+        assert!(snapshot.detection_healthy);
     }
 
     #[test]

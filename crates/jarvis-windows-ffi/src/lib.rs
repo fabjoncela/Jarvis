@@ -1,18 +1,27 @@
-//! Narrow, reviewed Win32 FFI boundary for Jarvis-owned worker jobs.
+//! Narrow, reviewed Win32 FFI boundary for worker containment, the fixed
+//! pre-match handoff, and read-only competitive trigger observation.
 //!
-//! This crate intentionally exposes no process-opening or arbitrary process
-//! assignment API. It can create, query, and terminate an unnamed Job Object
-//! that only future trusted worker-launch code may populate.
+//! Target processes are opened only for limited identity queries; arbitrary
+//! process assignment, termination, and service-control APIs are not exposed.
+//! The Job Object API can terminate only workers created and contained by
+//! Jarvis itself.
 
 #![allow(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
+
+mod control_pipe;
+
+pub use control_pipe::{
+    send_supervisor_control_request, SupervisorControlCommand, SupervisorControlPipeError,
+    SupervisorControlPipeServer,
+};
 
 use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
 use std::fs;
 use std::mem::size_of;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::time::Duration;
@@ -38,13 +47,15 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Services::{
-    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW, QUERY_SERVICE_CONFIGW,
-    SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW, QueryServiceStatusEx,
+    QUERY_SERVICE_CONFIGW, SC_HANDLE, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
+    SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_STATUS_PROCESS,
+    SERVICE_STOPPED,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessW, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess,
-    GetProcessTimes, OpenEventW, OpenProcess, ResumeThread, SetEvent, TerminateProcess,
-    WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
+    GetProcessTimes, OpenEventW, OpenProcess, QueryFullProcessImageNameW, ResumeThread, SetEvent,
+    TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
     PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE,
 };
 
@@ -93,12 +104,16 @@ pub enum FixedInternalWorker {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixedCompetitiveProcess {
     Cs2,
+    FaceitAcLauncher,
+    FaceitService,
 }
 
 impl FixedCompetitiveProcess {
     const fn executable_name(self) -> &'static str {
         match self {
             Self::Cs2 => "cs2.exe",
+            Self::FaceitAcLauncher => "faceitclient.exe",
+            Self::FaceitService => "faceitservice.exe",
         }
     }
 }
@@ -128,6 +143,8 @@ impl ObservedProcessIdentity {
 pub enum ProcessObservationError {
     Win32(Win32Error),
     CandidateIdentityUnavailable { process: FixedCompetitiveProcess },
+    CandidateImagePathUnavailable { process: FixedCompetitiveProcess },
+    CandidateImagePathMismatch { process: FixedCompetitiveProcess },
 }
 
 impl fmt::Display for ProcessObservationError {
@@ -138,6 +155,18 @@ impl fmt::Display for ProcessObservationError {
                 formatter,
                 "could not verify PID and creation-time identity for observed {process:?}"
             ),
+            Self::CandidateImagePathUnavailable { process } => {
+                write!(
+                    formatter,
+                    "could not verify the image path for observed {process:?}"
+                )
+            }
+            Self::CandidateImagePathMismatch { process } => {
+                write!(
+                    formatter,
+                    "observed {process:?} did not run from its fixed path"
+                )
+            }
         }
     }
 }
@@ -146,7 +175,9 @@ impl Error for ProcessObservationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Win32(error) => Some(error),
-            Self::CandidateIdentityUnavailable { .. } => None,
+            Self::CandidateIdentityUnavailable { .. }
+            | Self::CandidateImagePathUnavailable { .. }
+            | Self::CandidateImagePathMismatch { .. } => None,
         }
     }
 }
@@ -156,8 +187,41 @@ impl Error for ProcessObservationError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedPreMatchSetup {
     faceit_ac_launcher: PathBuf,
+    faceit_service: PathBuf,
     chrome: PathBuf,
     steam: PathBuf,
+}
+
+/// One read-only snapshot of the fixed competitive triggers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompetitiveActivitySnapshot {
+    pub cs2_running: bool,
+    pub verified_faceit_process_running: bool,
+    pub verified_faceit_service_active: bool,
+}
+
+#[derive(Debug)]
+pub enum CompetitiveActivityObservationError {
+    Process(ProcessObservationError),
+    Service(PreMatchSetupError),
+}
+
+impl fmt::Display for CompetitiveActivityObservationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Process(error) => error.fmt(formatter),
+            Self::Service(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for CompetitiveActivityObservationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Process(error) => Some(error),
+            Self::Service(error) => Some(error),
+        }
+    }
 }
 
 /// The only external applications this FACEIT setup flow can start. All
@@ -227,6 +291,7 @@ pub enum PreMatchSetupError {
     Service(Win32Error),
     ServiceBinaryMismatch,
     InvalidServiceCommandLine,
+    ServiceRunningWithoutProcessIdentity,
     Cs2ManifestMissing,
     Cs2ManifestUnreadable(std::io::Error),
     Cs2ManifestDoesNotDescribeApp730,
@@ -268,6 +333,10 @@ impl fmt::Display for PreMatchSetupError {
                 formatter,
                 "FACEITService has an unsupported service command line"
             ),
+            Self::ServiceRunningWithoutProcessIdentity => write!(
+                formatter,
+                "FACEITService is running without a verifiable process identity"
+            ),
             Self::Cs2ManifestMissing => write!(formatter, "Steam appmanifest_730.acf is missing"),
             Self::Cs2ManifestUnreadable(error) => {
                 write!(
@@ -294,6 +363,7 @@ impl Error for PreMatchSetupError {
             | Self::SignatureRejected { .. }
             | Self::ServiceBinaryMismatch
             | Self::InvalidServiceCommandLine
+            | Self::ServiceRunningWithoutProcessIdentity
             | Self::Cs2ManifestMissing
             | Self::Cs2ManifestDoesNotDescribeApp730 => None,
             Self::Service(error) => Some(error),
@@ -341,8 +411,35 @@ pub fn verify_default_pre_match_setup() -> Result<VerifiedPreMatchSetup, PreMatc
     verify_cs2_manifest(&steam_root)?;
     Ok(VerifiedPreMatchSetup {
         faceit_ac_launcher,
+        faceit_service,
         chrome,
         steam,
+    })
+}
+
+/// Reconciles the currently active fixed triggers against an already verified
+/// local FACEIT/Steam installation. The setup value carries identity only; it
+/// is not authority to launch applications or services.
+pub fn observe_competitive_activity(
+    setup: &VerifiedPreMatchSetup,
+) -> Result<CompetitiveActivitySnapshot, CompetitiveActivityObservationError> {
+    let processes = observe_competitive_processes(setup)
+        .map_err(CompetitiveActivityObservationError::Process)?;
+    let (service_active, service_process_id) = query_faceit_service_activity(setup)
+        .map_err(CompetitiveActivityObservationError::Service)?;
+    if service_active && service_process_id != 0 {
+        observed_process_identity(
+            FixedCompetitiveProcess::FaceitService,
+            service_process_id,
+            Some(&setup.faceit_service),
+        )
+        .map_err(CompetitiveActivityObservationError::Process)?;
+    }
+
+    Ok(CompetitiveActivitySnapshot {
+        cs2_running: processes.cs2_running,
+        verified_faceit_process_running: processes.faceit_ac_launcher_running,
+        verified_faceit_service_active: service_active || processes.faceit_service_process_running,
     })
 }
 
@@ -520,6 +617,82 @@ fn query_fixed_faceit_service_binary() -> Result<PathBuf, PreMatchSetupError> {
         let _ = CloseServiceHandle(manager);
     }
     result
+}
+
+fn query_faceit_service_activity(
+    setup: &VerifiedPreMatchSetup,
+) -> Result<(bool, u32), PreMatchSetupError> {
+    // SAFETY: Null machine and database names select the local active SCM;
+    // connect access is read-only and the returned handle is closed below.
+    let manager = unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return Err(PreMatchSetupError::Service(last_error("OpenSCManagerW")));
+    }
+    let service_name = wide_null_os(std::ffi::OsStr::new("FACEITService"));
+    // SAFETY: The service name is fixed and null-terminated. Query access is
+    // read-only; this handle cannot start, stop, or reconfigure the service.
+    let service = unsafe {
+        OpenServiceW(
+            manager,
+            service_name.as_ptr(),
+            SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS,
+        )
+    };
+    if service.is_null() {
+        let error = last_error("OpenServiceW");
+        // SAFETY: `manager` is the owned handle returned above and is no longer
+        // used after this close.
+        unsafe {
+            let _ = CloseServiceHandle(manager);
+        }
+        return Err(PreMatchSetupError::Service(error));
+    }
+
+    let result = (|| {
+        let configured = query_service_binary_path(service)?;
+        let configured = canonical_regular_file(&configured, "FACEITService binary")?;
+        if configured != setup.faceit_service {
+            return Err(PreMatchSetupError::ServiceBinaryMismatch);
+        }
+
+        let mut status = SERVICE_STATUS_PROCESS::default();
+        let mut bytes_needed = 0_u32;
+        // SAFETY: `service` is open for query access, `status` is a writable
+        // correctly sized output buffer, and `bytes_needed` is writable.
+        let queried = unsafe {
+            QueryServiceStatusEx(
+                service,
+                SC_STATUS_PROCESS_INFO,
+                (&mut status as *mut SERVICE_STATUS_PROCESS).cast::<u8>(),
+                size_of::<SERVICE_STATUS_PROCESS>() as u32,
+                &mut bytes_needed,
+            )
+        };
+        if queried == 0 {
+            return Err(PreMatchSetupError::Service(last_error(
+                "QueryServiceStatusEx",
+            )));
+        }
+        if status.dwCurrentState == SERVICE_RUNNING && status.dwProcessId == 0 {
+            return Err(PreMatchSetupError::ServiceRunningWithoutProcessIdentity);
+        }
+        Ok((
+            service_state_is_active(status.dwCurrentState),
+            status.dwProcessId,
+        ))
+    })();
+
+    // SAFETY: Both service and manager are owned successful opens and neither
+    // is used after these close operations.
+    unsafe {
+        let _ = CloseServiceHandle(service);
+        let _ = CloseServiceHandle(manager);
+    }
+    result
+}
+
+const fn service_state_is_active(current_state: u32) -> bool {
+    current_state != SERVICE_STOPPED
 }
 
 fn query_service_binary_path(service: SC_HANDLE) -> Result<PathBuf, PreMatchSetupError> {
@@ -1084,6 +1257,101 @@ pub fn observe_cs2_processes() -> Result<Vec<ObservedProcessIdentity>, ProcessOb
     result
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CompetitiveProcessActivity {
+    cs2_running: bool,
+    faceit_ac_launcher_running: bool,
+    faceit_service_process_running: bool,
+}
+
+fn observe_competitive_processes(
+    setup: &VerifiedPreMatchSetup,
+) -> Result<CompetitiveProcessActivity, ProcessObservationError> {
+    // SAFETY: TH32CS_SNAPPROCESS requests a read-only process snapshot for all
+    // processes, and process ID zero is the documented value for this flag.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(ProcessObservationError::Win32(last_error(
+            "CreateToolhelp32Snapshot",
+        )));
+    }
+
+    let result = observe_competitive_processes_in_snapshot(snapshot, setup);
+    // SAFETY: `snapshot` is the owned handle returned by CreateToolhelp32Snapshot.
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    result
+}
+
+fn observe_competitive_processes_in_snapshot(
+    snapshot: HANDLE,
+    setup: &VerifiedPreMatchSetup,
+) -> Result<CompetitiveProcessActivity, ProcessObservationError> {
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `snapshot` is a live Tool Help snapshot and `entry` has its
+    // required size field initialized with writable storage for this call.
+    let first = unsafe { Process32FirstW(snapshot, &mut entry) };
+    if first == 0 {
+        let error = last_error("Process32FirstW");
+        return if error.code() == ERROR_NO_MORE_FILES {
+            Ok(CompetitiveProcessActivity::default())
+        } else {
+            Err(ProcessObservationError::Win32(error))
+        };
+    }
+
+    let mut activity = CompetitiveProcessActivity::default();
+    loop {
+        let process = match process_entry_name(&entry).as_str() {
+            name if name == FixedCompetitiveProcess::Cs2.executable_name() => {
+                Some(FixedCompetitiveProcess::Cs2)
+            }
+            name if name == FixedCompetitiveProcess::FaceitAcLauncher.executable_name() => {
+                Some(FixedCompetitiveProcess::FaceitAcLauncher)
+            }
+            name if name == FixedCompetitiveProcess::FaceitService.executable_name() => {
+                Some(FixedCompetitiveProcess::FaceitService)
+            }
+            _ => None,
+        };
+        if let Some(process) = process {
+            let expected_path = match process {
+                FixedCompetitiveProcess::Cs2 => None,
+                FixedCompetitiveProcess::FaceitAcLauncher => {
+                    Some(setup.faceit_ac_launcher.as_path())
+                }
+                FixedCompetitiveProcess::FaceitService => Some(setup.faceit_service.as_path()),
+            };
+            observed_process_identity(process, entry.th32ProcessID, expected_path)?;
+            match process {
+                FixedCompetitiveProcess::Cs2 => activity.cs2_running = true,
+                FixedCompetitiveProcess::FaceitAcLauncher => {
+                    activity.faceit_ac_launcher_running = true
+                }
+                FixedCompetitiveProcess::FaceitService => {
+                    activity.faceit_service_process_running = true
+                }
+            }
+        }
+
+        // SAFETY: `snapshot` remains live and `entry` is the documented
+        // in/out structure for advancing this synchronous snapshot walk.
+        let next = unsafe { Process32NextW(snapshot, &mut entry) };
+        if next != 0 {
+            continue;
+        }
+        let error = last_error("Process32NextW");
+        if error.code() == ERROR_NO_MORE_FILES {
+            return Ok(activity);
+        }
+        return Err(ProcessObservationError::Win32(error));
+    }
+}
+
 fn observe_cs2_processes_in_snapshot(
     snapshot: HANDLE,
 ) -> Result<Vec<ObservedProcessIdentity>, ProcessObservationError> {
@@ -1111,6 +1379,7 @@ fn observe_cs2_processes_in_snapshot(
             identities.push(observed_process_identity(
                 FixedCompetitiveProcess::Cs2,
                 entry.th32ProcessID,
+                None,
             )?);
         }
 
@@ -1131,6 +1400,7 @@ fn observe_cs2_processes_in_snapshot(
 fn observed_process_identity(
     process: FixedCompetitiveProcess,
     process_id: u32,
+    expected_image_path: Option<&Path>,
 ) -> Result<ObservedProcessIdentity, ProcessObservationError> {
     // SAFETY: This requests only documented limited query access, does not
     // inherit the handle, and neither reads nor writes target process memory.
@@ -1138,15 +1408,50 @@ fn observed_process_identity(
     if handle.is_null() {
         return Err(ProcessObservationError::CandidateIdentityUnavailable { process });
     }
-    let identity = process_identity(handle, process_id).map(|identity| ObservedProcessIdentity {
-        process_id: identity.process_id(),
-        creation_time_filetime: identity.creation_time_filetime(),
-    });
+    let identity = (|| {
+        let identity =
+            process_identity(handle, process_id).map_err(ProcessObservationError::Win32)?;
+        if let Some(expected_path) = expected_image_path {
+            let actual_path = process_image_path(handle, process)?;
+            if !same_windows_path(expected_path, &actual_path) {
+                return Err(ProcessObservationError::CandidateImagePathMismatch { process });
+            }
+        }
+        Ok(ObservedProcessIdentity {
+            process_id: identity.process_id(),
+            creation_time_filetime: identity.creation_time_filetime(),
+        })
+    })();
     // SAFETY: `handle` is owned by this function and is not used after close.
     unsafe {
         let _ = CloseHandle(handle);
     }
-    identity.map_err(ProcessObservationError::Win32)
+    identity
+}
+
+fn process_image_path(
+    process_handle: HANDLE,
+    process: FixedCompetitiveProcess,
+) -> Result<PathBuf, ProcessObservationError> {
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = buffer.len() as u32;
+    // SAFETY: `process_handle` was opened only with limited query access and
+    // the writable UTF-16 buffer remains live for this synchronous call.
+    let queried =
+        unsafe { QueryFullProcessImageNameW(process_handle, 0, buffer.as_mut_ptr(), &mut length) };
+    if queried == 0 || length as usize > buffer.len() {
+        return Err(ProcessObservationError::CandidateImagePathUnavailable { process });
+    }
+    let image_path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+    image_path
+        .canonicalize()
+        .map_err(|_| ProcessObservationError::CandidateImagePathUnavailable { process })
+}
+
+fn same_windows_path(expected: &Path, actual: &Path) -> bool {
+    expected
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&actual.to_string_lossy())
 }
 
 fn process_entry_name(entry: &PROCESSENTRY32W) -> String {
@@ -1372,5 +1677,38 @@ mod tests {
             PreMatchLaunchStep::SteamCs2.command_line(),
             "steam.exe -applaunch 730"
         );
+    }
+
+    #[test]
+    fn competitive_process_names_are_a_closed_fixed_set() {
+        assert_eq!(FixedCompetitiveProcess::Cs2.executable_name(), "cs2.exe");
+        assert_eq!(
+            FixedCompetitiveProcess::FaceitAcLauncher.executable_name(),
+            "faceitclient.exe"
+        );
+        assert_eq!(
+            FixedCompetitiveProcess::FaceitService.executable_name(),
+            "faceitservice.exe"
+        );
+    }
+
+    #[test]
+    fn faceit_service_state_is_a_trigger_until_stopped() {
+        assert!(!service_state_is_active(SERVICE_STOPPED));
+        assert!(service_state_is_active(2)); // Start pending.
+        assert!(service_state_is_active(3)); // Stop pending.
+        assert!(service_state_is_active(SERVICE_RUNNING));
+    }
+
+    #[test]
+    fn fixed_process_identity_comparison_is_case_insensitive_but_exact() {
+        assert!(same_windows_path(
+            Path::new("C:\\Program Files\\FACEIT AC\\faceitclient.exe"),
+            Path::new("c:\\program files\\faceit ac\\FACEITCLIENT.EXE")
+        ));
+        assert!(!same_windows_path(
+            Path::new("C:\\Program Files\\FACEIT AC\\faceitclient.exe"),
+            Path::new("C:\\Temp\\faceitclient.exe")
+        ));
     }
 }
