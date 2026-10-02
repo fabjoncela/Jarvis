@@ -27,11 +27,11 @@ use jarvis_verification::{
     VerificationCase, VerificationError,
 };
 use jarvis_windows::{
-    observe_fixed_discord_process_count, run_pre_match_handoff, set_default_master_volume,
-    verify_fixed_discord_launcher, AudioEndpointError, DiscordProcessObservationError,
-    InternalWorker, PreMatchHandoffError, PreMatchHandoffReport, PreMatchSetupError, Win32Error,
-    WindowsWorkerManager, WorkerManagerError, WorkerManifest, WorkerProcessIdentity,
-    WorkerShutdownReport,
+    observe_fixed_discord_process_count, read_default_master_volume, run_pre_match_handoff,
+    set_default_master_volume, verify_fixed_discord_launcher, AudioEndpointError,
+    DiscordProcessObservationError, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport,
+    PreMatchSetupError, Win32Error, WindowsWorkerManager, WorkerManagerError, WorkerManifest,
+    WorkerProcessIdentity, WorkerShutdownReport,
 };
 
 #[derive(Debug)]
@@ -622,6 +622,16 @@ impl Supervisor {
         Ok((request.request_id, observed))
     }
 
+    /// On-demand read-only observation; the endpoint identity is fixed by
+    /// Windows for the current user, never selected by IPC payload.
+    pub fn master_volume_status(&self) -> Result<f32, VolumeRequestError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.controller
+            .authorize_action(request)
+            .map_err(VolumeRequestError::Authorization)?;
+        read_default_master_volume().map_err(VolumeRequestError::Audio)
+    }
+
     fn authorize_volume_request(
         &self,
         request: RequestContext,
@@ -1193,6 +1203,12 @@ mod tests {
             supervisor.authorize_volume_request(current, 50),
             Err(VolumeRequestError::Validation(
                 ValidationError::ProfileGate(GateError::ProfileRestricted)
+            ))
+        ));
+        assert!(matches!(
+            supervisor.master_volume_status(),
+            Err(VolumeRequestError::Authorization(
+                GateError::ProfileRestricted
             ))
         ));
     }

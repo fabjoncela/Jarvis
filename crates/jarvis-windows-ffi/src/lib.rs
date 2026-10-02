@@ -13,7 +13,9 @@ mod audio_endpoint;
 mod control_pipe;
 mod lifecycle_notifications;
 
-pub use audio_endpoint::{set_default_master_volume, AudioEndpointError};
+pub use audio_endpoint::{
+    read_default_master_volume, set_default_master_volume, AudioEndpointError,
+};
 pub use control_pipe::{
     send_supervisor_control_request, DiscordFeedback, PreferredApp, SupervisorControlCommand,
     SupervisorControlPipeError, SupervisorControlPipeServer,

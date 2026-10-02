@@ -51,6 +51,44 @@ pub fn set_default_master_volume(percent: u8) -> Result<f32, AudioEndpointError>
     if percent > 100 {
         return Err(AudioEndpointError::InvalidPercent);
     }
+    with_default_volume(|volume| {
+        let target = f32::from(percent) / 100.0;
+        // SAFETY: `volume` is the COM interface obtained for the fixed default
+        // render endpoint and the scalar is checked to be in 0.0..=1.0.
+        unsafe {
+            volume
+                .SetMasterVolumeLevelScalar(target, null())
+                .map_err(AudioEndpointError::Windows)?;
+            let observed = volume
+                .GetMasterVolumeLevelScalar()
+                .map_err(AudioEndpointError::Windows)?;
+            if (observed - target).abs() > 0.005 {
+                return Err(AudioEndpointError::ReadbackMismatch {
+                    requested: percent,
+                    observed,
+                });
+            }
+            Ok(observed)
+        }
+    })
+}
+
+/// Reads only the current default console render endpoint master scalar.
+pub fn read_default_master_volume() -> Result<f32, AudioEndpointError> {
+    with_default_volume(|volume| {
+        // SAFETY: `volume` is the owned interface for the fixed default
+        // endpoint; the call returns a scalar without changing device state.
+        unsafe {
+            volume
+                .GetMasterVolumeLevelScalar()
+                .map_err(AudioEndpointError::Windows)
+        }
+    })
+}
+
+fn with_default_volume<T>(
+    operation: impl FnOnce(&IAudioEndpointVolume) -> Result<T, AudioEndpointError>,
+) -> Result<T, AudioEndpointError> {
     // SAFETY: COM is initialized and released on the same thread. All COM
     // pointers are owned by windows-rs wrappers and remain within this call.
     unsafe {
@@ -67,19 +105,6 @@ pub fn set_default_master_volume(percent: u8) -> Result<f32, AudioEndpointError>
         let volume: IAudioEndpointVolume = device
             .Activate(CLSCTX_ALL, None)
             .map_err(AudioEndpointError::Windows)?;
-        let target = f32::from(percent) / 100.0;
-        volume
-            .SetMasterVolumeLevelScalar(target, null())
-            .map_err(AudioEndpointError::Windows)?;
-        let observed = volume
-            .GetMasterVolumeLevelScalar()
-            .map_err(AudioEndpointError::Windows)?;
-        if (observed - target).abs() > 0.005 {
-            return Err(AudioEndpointError::ReadbackMismatch {
-                requested: percent,
-                observed,
-            });
-        }
-        Ok(observed)
+        operation(&volume)
     }
 }

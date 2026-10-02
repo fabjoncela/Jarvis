@@ -87,6 +87,8 @@ fixed typed resident request. The owner repeats validation and generation
 admission before Windows Core Audio changes the current default console
 render endpoint; the request cannot select an endpoint. A scalar readback is
 reported separately from audible success. Competitive Mode denies the action.
+`--volume-status` is a separate on-demand, read-only observation through the
+same fixed endpoint and profile gate; it does not execute a volume change.
 The `--execute <text>` CLI reuses the conservative local router, but converts
 only configured Discord aliases and the bounded volume pattern to fixed pipe
 commands. It cannot

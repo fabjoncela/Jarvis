@@ -130,8 +130,22 @@ pre-match launch sequence, not a running desktop assistant:
     narrow Core Audio adapter changes only the default console render
     endpoint and reads back its scalar. No arbitrary endpoint or COM object is
     request-selectable. Tests cover malformed protocol, out-of-range values,
-    and Competitive/stale-generation denial. The native audio call has not
-    yet been live-smoke-tested; the running monitor is an older binary.
+    and Competitive/stale-generation denial. The write call has not yet been
+    live-smoke-tested.
+22. `--volume-status` makes one on-demand read-only Core Audio query of that
+    fixed endpoint in God Mode. It is denied by the profile gate during
+    Competitive Mode. Its scalar is reported as an approximate percentage,
+    not evidence of audible output.
+
+## Read-only volume smoke result (3 October 2026)
+
+After a successful workspace build and self-check, the old monitor was
+replaced while its latest identity-verified CS2/FACEIT snapshot was healthy
+and idle. The new resident process runs from `target\debug\jarvis.exe` and
+reported healthy stable God Mode with all three fixed triggers inactive.
+`--volume-status` returned approximately 98% for the default console output
+endpoint. No audio setting, game, browser, FACEIT component, or service was
+changed. The `--set-volume` write path remains untested on the live endpoint.
 
 ## Explicitly not implemented
 

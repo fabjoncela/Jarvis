@@ -58,6 +58,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
         [flag] if flag == "--discord-status" => return discord_status(),
+        [flag] if flag == "--volume-status" => return volume_status(),
         [flag, percent] if flag == "--set-volume" => return set_volume_cli(percent),
         [flag, reference, kind] if flag == "--feedback-discord" => {
             return feedback_discord(reference, kind);
@@ -96,7 +97,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -706,6 +707,20 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 }
             }
         }
+        SupervisorControlCommand::MasterVolumeStatus => {
+            if !status.action_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            match supervisor.master_volume_status() {
+                Ok(observed) => Ok(format!(
+                    "OK MASTER_VOLUME_STATUS OBSERVED_SCALAR={observed:.4}"
+                )),
+                Err(error) => {
+                    eprintln!("master volume observation failed: {error}");
+                    Ok("ERR MASTER_VOLUME_STATUS".to_owned())
+                }
+            }
+        }
         SupervisorControlCommand::FeedbackDiscord { reference, kind } => {
             if !status.action_gate_open {
                 return Ok("ERR POLICY".to_owned());
@@ -1013,6 +1028,30 @@ fn set_volume_cli(value: &str) -> Result<(), String> {
     Err(match response.as_str() {
         "ERR POLICY" => "volume action denied by Competitive Mode policy".to_owned(),
         "ERR MASTER_VOLUME" => "volume action failed; check monitor console".to_owned(),
+        _ => "authoritative supervisor returned an invalid volume response".to_owned(),
+    })
+}
+
+fn volume_status() -> Result<(), String> {
+    let response = send_supervisor_control_request(SupervisorControlCommand::MasterVolumeStatus)
+        .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+    if let Some(value) = response.strip_prefix("OK MASTER_VOLUME_STATUS OBSERVED_SCALAR=") {
+        let scalar = value
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            .ok_or_else(|| {
+                "authoritative supervisor returned an invalid volume scalar".to_owned()
+            })?;
+        println!(
+            "Current default output master volume: approximately {:.0}%",
+            scalar * 100.0
+        );
+        return Ok(());
+    }
+    Err(match response.as_str() {
+        "ERR POLICY" => "volume observation is disabled in Competitive Mode".to_owned(),
+        "ERR MASTER_VOLUME_STATUS" => "could not read the default output volume".to_owned(),
         _ => "authoritative supervisor returned an invalid volume response".to_owned(),
     })
 }

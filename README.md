@@ -165,8 +165,9 @@ render endpoint's master volume through Windows Core Audio. The resident owner
 validates the typed action and current profile generation before the call;
 Competitive Mode denies it. A successful response includes the scalar read
 back from that endpoint. It does not prove audible output or that an external
-device did not change afterward. The command has not yet been smoke-tested on
-the live audio endpoint, and the currently running monitor predates it.
+device did not change afterward. The write command has not yet been
+live-smoke-tested. `--volume-status` reads the current default output master
+scalar without changing it and was smoke-tested against the resident monitor.
 
 `--discord-status` makes one on-demand, read-only check for signed Discord
 processes under the fixed versioned local installation. It is denied during

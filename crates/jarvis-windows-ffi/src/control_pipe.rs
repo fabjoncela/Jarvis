@@ -99,6 +99,7 @@ pub enum SupervisorControlCommand {
     LastHandoff,
     OpenDiscord,
     DiscordStatus,
+    MasterVolumeStatus,
     SetMasterVolume {
         percent: u8,
     },
@@ -135,6 +136,7 @@ impl SupervisorControlCommand {
             Self::LastHandoff => b"JARVIS/1 LAST_HANDOFF".to_vec(),
             Self::OpenDiscord => b"JARVIS/1 OPEN_DISCORD".to_vec(),
             Self::DiscordStatus => b"JARVIS/1 DISCORD_STATUS".to_vec(),
+            Self::MasterVolumeStatus => b"JARVIS/1 MASTER_VOLUME_STATUS".to_vec(),
             Self::SetMasterVolume { percent } =>
                 format!("JARVIS/1 SET_MASTER_VOLUME {percent}").into_bytes(),
             Self::FeedbackDiscord { reference, kind } =>
@@ -168,6 +170,7 @@ impl SupervisorControlCommand {
             b"JARVIS/1 LAST_HANDOFF" => Some(Self::LastHandoff),
             b"JARVIS/1 OPEN_DISCORD" => Some(Self::OpenDiscord),
             b"JARVIS/1 DISCORD_STATUS" => Some(Self::DiscordStatus),
+            b"JARVIS/1 MASTER_VOLUME_STATUS" => Some(Self::MasterVolumeStatus),
             b"JARVIS/1 PREPARE_FACEIT_CS2" => Some(Self::PrepareFaceitCs2),
             b"JARVIS/1 WORKER_SELF_CHECK" => Some(Self::WorkerSelfCheck),
             b"JARVIS/1 SHOW_PREFERRED_APP" => Some(Self::ShowPreferredApp),
@@ -773,6 +776,10 @@ mod tests {
 
     #[test]
     fn wire_parser_rejects_arbitrary_payloads() {
+        assert_eq!(
+            SupervisorControlCommand::parse(&SupervisorControlCommand::MasterVolumeStatus.wire()),
+            Some(SupervisorControlCommand::MasterVolumeStatus)
+        );
         for percent in [0, 1, 50, 100] {
             let command = SupervisorControlCommand::SetMasterVolume { percent };
             assert_eq!(
