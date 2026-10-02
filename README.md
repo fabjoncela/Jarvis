@@ -157,6 +157,12 @@ rejected without an effect. Run this client from the exact same executable
 path as the resident monitor; `cargo run` from a different target directory
 will fail the peer-identity check.
 
+`--discord-status` makes one on-demand, read-only check for signed Discord
+processes under the fixed versioned local installation. It is denied during
+Competitive Mode and reports unknown if a Discord-named candidate cannot be
+verified. A process count does not prove a ready window, login, or that a
+specific Jarvis request started it.
+
 `--pre-match-setup-self-check` verifies that exact local handoff setup without
 starting anything: fixed Program Files locations, valid Windows Authenticode
 trust for the FACEIT Anti-Cheat Launcher/Service, Chrome, and Steam binaries,

@@ -56,6 +56,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
+        [flag] if flag == "--discord-status" => return discord_status(),
         [flag, command] if flag == "--execute" => {
             return execute_text_command(command, configuration_directory);
         }
@@ -90,7 +91,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -670,6 +671,22 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 }
             }
         }
+        SupervisorControlCommand::DiscordStatus => {
+            if !status.action_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            match supervisor.discord_process_count() {
+                Ok(count) => {
+                    let _ = monitor_cycle(supervisor, detector, last_report)?;
+                    Ok(format!("OK DISCORD_STATUS PROCESS_COUNT={count} READINESS=UNVERIFIED"))
+                }
+                Err(error) => {
+                    eprintln!("Discord status observation unavailable: {error}");
+                    let _ = monitor_cycle(supervisor, detector, last_report)?;
+                    Ok("ERR DISCORD_STATUS_UNKNOWN".to_owned())
+                }
+            }
+        }
         SupervisorControlCommand::RememberPreferredApp { event_id, expected_generation, app } => {
             let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
             let id = EventId::new(format!("{event_id:032x}"))
@@ -899,6 +916,34 @@ fn open_discord() -> Result<(), String> {
     println!("{response}");
     println!("Launch request accepted; Discord startup or window state was not verified.");
     Ok(())
+}
+
+fn discord_status() -> Result<(), String> {
+    let response = send_supervisor_control_request(SupervisorControlCommand::DiscordStatus)
+        .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+    if let Some(count) = response.strip_prefix("OK DISCORD_STATUS PROCESS_COUNT=") {
+        let count = count
+            .strip_suffix(" READINESS=UNVERIFIED")
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| {
+                "authoritative supervisor returned an invalid Discord count".to_owned()
+            })?;
+        if count > 64 {
+            return Err("authoritative supervisor returned an invalid Discord count".to_owned());
+        }
+        println!("Verified Discord processes currently observed: {count}");
+        println!(
+            "This does not verify a ready window, login, or which launch request started them."
+        );
+        return Ok(());
+    }
+    Err(match response.as_str() {
+        "ERR POLICY" => "Discord process observation is disabled in Competitive Mode".to_owned(),
+        "ERR DISCORD_STATUS_UNKNOWN" => {
+            "Discord process identity could not be verified; state is unknown".to_owned()
+        }
+        _ => "authoritative supervisor returned an invalid Discord status response".to_owned(),
+    })
 }
 
 /// Converts conservative local routing into one closed, typed resident

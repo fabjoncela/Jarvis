@@ -20,6 +20,7 @@ pub use lifecycle_notifications::{
     CompetitiveLifecycleNotifications, LifecycleNotificationFailure,
 };
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
@@ -484,6 +485,41 @@ pub struct VerifiedDiscordLauncher {
     executable: PathBuf,
 }
 
+#[derive(Debug)]
+pub enum DiscordProcessObservationError {
+    Setup(PreMatchSetupError),
+    Win32(Win32Error),
+    CandidateIdentityUnavailable,
+    CandidateImageUnavailable,
+    CandidateImageOutsideInstall,
+    TooManyCandidates,
+    TooManyDistinctImages,
+}
+
+impl fmt::Display for DiscordProcessObservationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Setup(error) => error.fmt(formatter),
+            Self::Win32(error) => error.fmt(formatter),
+            Self::CandidateIdentityUnavailable => {
+                formatter.write_str("Discord process identity unavailable")
+            }
+            Self::CandidateImageUnavailable => {
+                formatter.write_str("Discord process image unavailable")
+            }
+            Self::CandidateImageOutsideInstall => {
+                formatter.write_str("Discord-named process outside the fixed installation")
+            }
+            Self::TooManyCandidates => formatter.write_str("too many Discord process candidates"),
+            Self::TooManyDistinctImages => {
+                formatter.write_str("too many distinct Discord process images")
+            }
+        }
+    }
+}
+
+impl Error for DiscordProcessObservationError {}
+
 impl VerifiedDiscordLauncher {
     /// Successful return means CreateProcess accepted the request, not that
     /// Discord completed startup. Call only after fresh supervisor admission.
@@ -499,6 +535,144 @@ pub fn verify_fixed_discord_launcher() -> Result<VerifiedDiscordLauncher, PreMat
     let executable = fixed_regular_file(&local_app_data.join("Discord"), "Discord.exe", "Discord")?;
     verify_trusted_signature(&executable, "Discord")?;
     Ok(VerifiedDiscordLauncher { executable })
+}
+
+/// Counts only signed Discord processes in the fixed versioned installation
+/// layout. This is a current-state observation, not proof that a prior launch
+/// request caused the process or that a window or login is ready.
+pub fn observe_fixed_discord_process_count() -> Result<u32, DiscordProcessObservationError> {
+    let local_app_data =
+        required_directory("LOCALAPPDATA").map_err(DiscordProcessObservationError::Setup)?;
+    let root = local_app_data
+        .join("Discord")
+        .canonicalize()
+        .map_err(|source| {
+            DiscordProcessObservationError::Setup(PreMatchSetupError::Resolve {
+                component: "Discord",
+                source,
+            })
+        })?;
+    // SAFETY: This is a read-only process snapshot; no process is modified.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(DiscordProcessObservationError::Win32(last_error(
+            "CreateToolhelp32Snapshot",
+        )));
+    }
+    let result = observe_discord_processes_in_snapshot(snapshot, &root);
+    // SAFETY: The snapshot handle is owned by this function.
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    result
+}
+
+fn observe_discord_processes_in_snapshot(
+    snapshot: HANDLE,
+    root: &Path,
+) -> Result<u32, DiscordProcessObservationError> {
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: The snapshot is live and the entry structure is initialized.
+    let first = unsafe { Process32FirstW(snapshot, &mut entry) };
+    if first == 0 {
+        let error = last_error("Process32FirstW");
+        return if error.code() == ERROR_NO_MORE_FILES {
+            Ok(0)
+        } else {
+            Err(DiscordProcessObservationError::Win32(error))
+        };
+    }
+    let mut count = 0_u32;
+    let mut trusted_images = BTreeSet::new();
+    loop {
+        if process_entry_name(&entry) == "discord.exe" {
+            if count >= 64 {
+                return Err(DiscordProcessObservationError::TooManyCandidates);
+            }
+            let image = verify_discord_process_candidate(entry.th32ProcessID, root)?;
+            if !trusted_images.contains(&image) {
+                if trusted_images.len() >= 2 {
+                    return Err(DiscordProcessObservationError::TooManyDistinctImages);
+                }
+                verify_trusted_signature(&image, "Discord process")
+                    .map_err(DiscordProcessObservationError::Setup)?;
+                trusted_images.insert(image);
+            }
+            count += 1;
+        }
+        // SAFETY: The snapshot remains live and `entry` is the documented
+        // in/out structure for this bounded synchronous walk.
+        let next = unsafe { Process32NextW(snapshot, &mut entry) };
+        if next != 0 {
+            continue;
+        }
+        let error = last_error("Process32NextW");
+        return if error.code() == ERROR_NO_MORE_FILES {
+            Ok(count)
+        } else {
+            Err(DiscordProcessObservationError::Win32(error))
+        };
+    }
+}
+
+fn verify_discord_process_candidate(
+    process_id: u32,
+    root: &Path,
+) -> Result<PathBuf, DiscordProcessObservationError> {
+    // SAFETY: Query-limited access reads identity and image path only.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if handle.is_null() {
+        return Err(DiscordProcessObservationError::CandidateIdentityUnavailable);
+    }
+    let result = (|| {
+        process_identity(handle, process_id).map_err(DiscordProcessObservationError::Win32)?;
+        let mut buffer = vec![0_u16; 32_768];
+        let mut length = buffer.len() as u32;
+        // SAFETY: The handle has query-limited access and the buffer is writable.
+        let queried =
+            unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) };
+        if queried == 0 || length as usize > buffer.len() {
+            return Err(DiscordProcessObservationError::CandidateImageUnavailable);
+        }
+        let image = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]))
+            .canonicalize()
+            .map_err(|_| DiscordProcessObservationError::CandidateImageUnavailable)?;
+        if !discord_app_image_belongs_to_root(&image, root) {
+            return Err(DiscordProcessObservationError::CandidateImageOutsideInstall);
+        }
+        Ok(image)
+    })();
+    // SAFETY: This function owns the process handle and no longer uses it.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    result
+}
+
+fn discord_app_image_belongs_to_root(image: &Path, root: &Path) -> bool {
+    let Some(filename) = image.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(app_directory) = image.parent() else {
+        return false;
+    };
+    let Some(app_name) = app_directory.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(parent) = app_directory.parent() else {
+        return false;
+    };
+    let Some(version) = app_name.strip_prefix("app-") else {
+        return false;
+    };
+    filename.eq_ignore_ascii_case("Discord.exe")
+        && version.split('.').all(|segment| {
+            !segment.is_empty() && segment.chars().all(|character| character.is_ascii_digit())
+        })
+        && same_windows_path(parent, root)
 }
 
 struct ChromeWindowScan<'a> {
@@ -1895,5 +2069,22 @@ mod tests {
             Path::new("C:\\Program Files\\FACEIT AC\\faceitclient.exe"),
             Path::new("C:\\Temp\\faceitclient.exe")
         ));
+    }
+
+    #[test]
+    fn discord_process_identity_accepts_only_versioned_fixed_install_layout() {
+        let root = Path::new(r"C:\Users\Admin\AppData\Local\Discord");
+        assert!(discord_app_image_belongs_to_root(
+            Path::new(r"C:\Users\Admin\AppData\Local\Discord\app-1.0.9260\Discord.exe"),
+            root,
+        ));
+        for image in [
+            r"C:\Users\Admin\AppData\Local\Discord\Discord.exe",
+            r"C:\Users\Admin\AppData\Local\Discord\app-1..0\Discord.exe",
+            r"C:\Users\Admin\AppData\Local\Discord\app-1.0.9260\other.exe",
+            r"C:\Temp\Discord\app-1.0.9260\Discord.exe",
+        ] {
+            assert!(!discord_app_image_belongs_to_root(Path::new(image), root));
+        }
     }
 }

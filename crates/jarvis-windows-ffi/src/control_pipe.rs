@@ -82,6 +82,7 @@ pub enum SupervisorControlCommand {
     Status,
     LastHandoff,
     OpenDiscord,
+    DiscordStatus,
     PrepareFaceitCs2,
     WorkerSelfCheck,
     RememberPreferredApp {
@@ -110,6 +111,7 @@ impl SupervisorControlCommand {
             Self::Status => b"JARVIS/1 STATUS".to_vec(),
             Self::LastHandoff => b"JARVIS/1 LAST_HANDOFF".to_vec(),
             Self::OpenDiscord => b"JARVIS/1 OPEN_DISCORD".to_vec(),
+            Self::DiscordStatus => b"JARVIS/1 DISCORD_STATUS".to_vec(),
             Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2".to_vec(),
             Self::WorkerSelfCheck => b"JARVIS/1 WORKER_SELF_CHECK".to_vec(),
             Self::RememberPreferredApp {
@@ -138,6 +140,7 @@ impl SupervisorControlCommand {
             b"JARVIS/1 STATUS" => Some(Self::Status),
             b"JARVIS/1 LAST_HANDOFF" => Some(Self::LastHandoff),
             b"JARVIS/1 OPEN_DISCORD" => Some(Self::OpenDiscord),
+            b"JARVIS/1 DISCORD_STATUS" => Some(Self::DiscordStatus),
             b"JARVIS/1 PREPARE_FACEIT_CS2" => Some(Self::PrepareFaceitCs2),
             b"JARVIS/1 WORKER_SELF_CHECK" => Some(Self::WorkerSelfCheck),
             b"JARVIS/1 SHOW_PREFERRED_APP" => Some(Self::ShowPreferredApp),
@@ -730,6 +733,10 @@ mod tests {
         assert_eq!(
             SupervisorControlCommand::parse(&SupervisorControlCommand::OpenDiscord.wire()),
             Some(SupervisorControlCommand::OpenDiscord)
+        );
+        assert_eq!(
+            SupervisorControlCommand::parse(&SupervisorControlCommand::DiscordStatus.wire()),
+            Some(SupervisorControlCommand::DiscordStatus)
         );
         assert_eq!(SupervisorControlCommand::parse(b"run powershell"), None);
         assert_eq!(

@@ -22,14 +22,14 @@ use jarvis_windows_ffi::{
     PreMatchLaunchOutcome, RunningInternalWorker,
 };
 pub use jarvis_windows_ffi::{
-    observe_competitive_activity, observe_cs2_processes, send_supervisor_control_request,
-    verify_default_pre_match_setup, verify_fixed_discord_launcher,
+    observe_competitive_activity, observe_cs2_processes, observe_fixed_discord_process_count,
+    send_supervisor_control_request, verify_default_pre_match_setup, verify_fixed_discord_launcher,
     CompetitiveActivityObservationError, CompetitiveActivitySnapshot,
-    CompetitiveLifecycleNotifications, FixedCompetitiveProcess, LifecycleNotificationFailure,
-    ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError,
-    PreferredApp, ProcessObservationError, SupervisorControlCommand, SupervisorControlPipeError,
-    SupervisorControlPipeServer, VerifiedDiscordLauncher, VerifiedPreMatchSetup, Win32Error,
-    WorkerLaunchError,
+    CompetitiveLifecycleNotifications, DiscordProcessObservationError, FixedCompetitiveProcess,
+    LifecycleNotificationFailure, ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep,
+    PreMatchSetupError, PreferredApp, ProcessObservationError, SupervisorControlCommand,
+    SupervisorControlPipeError, SupervisorControlPipeServer, VerifiedDiscordLauncher,
+    VerifiedPreMatchSetup, Win32Error, WorkerLaunchError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

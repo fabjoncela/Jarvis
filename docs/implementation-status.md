@@ -112,6 +112,11 @@ pre-match launch sequence, not a running desktop assistant:
     `OPEN_DISCORD` pipe command; all other plans and unknown text are rejected
     before IPC. The resident owner still validates its typed action, profile,
     and generation. `--route` remains validation-only.
+19. `--discord-status` makes one read-only fixed-scope process snapshot in
+    God Mode. It verifies PID/creation-time identity, canonical versioned
+    Discord image location, and Windows trust, and reports the process count.
+    A failed or mismatched candidate makes the state unknown. Presence is
+    never attributed to a launch receipt or promoted to UI/login readiness.
 
 ## Explicitly not implemented
 
@@ -160,7 +165,7 @@ authoritative, and do not add a general executable- or PID-based API.
 
 The resident monitor was updated while detection was healthy and CS2, the
 verified FACEIT launcher, and `FACEITService` were inactive. It now runs from
-`target\next-text-action\debug\jarvis.exe` as an explicit hidden process, not
+`target\next-discord-verify2\debug\jarvis.exe` as an explicit hidden process, not
 an installed service or automatic-start application. Status and preferred-app
 read/empty-clear/canceled-save commands were exercised through its fixed pipe.
 The read created an empty `%LOCALAPPDATA%\Jarvis\jarvis.db`; no preference was
@@ -235,6 +240,18 @@ Discord"`; it returned the fixed Discord launch receipt and the resident
 monitor stayed in healthy God Mode. Separate `open cs2`, `prepare faceit cs2`,
 and unknown-command attempts exited without launch. The older `--route`
 command remains preview-only.
+
+## Fixed Discord process observation (3 October 2026)
+
+The on-demand `--discord-status` command observed six signed processes under
+the fixed versioned Discord installation. An initial implementation checked
+the same image signature once per process and took about 1.1 seconds per
+request; it was replaced with one trust check per distinct image, capped at
+two image versions. Three subsequent client round trips measured 229.5–249.8
+ms while the supervisor stayed in healthy God Mode. These are local samples,
+not a hard latency guarantee; the synchronous query can still briefly delay
+the resident monitor's next poll. No Discord, game, browser, or FACEIT process
+was started or closed for this status test.
 
 ## One-time Chrome FACEIT title check
 

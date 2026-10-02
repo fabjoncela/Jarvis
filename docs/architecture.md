@@ -86,6 +86,13 @@ send arbitrary text or a new executable path to the owner. Other routed plans
 remain previews or use their separate explicit workflow; `--route` is still
 validation-only.
 
+The on-demand `--discord-status` observation is separate from launch dispatch.
+It checks only Discord-named processes through limited identity queries,
+requires a signed image in the fixed versioned installation layout, and
+returns unknown on identity failures. It is not available while Competitive
+Mode closes the action gate and does not establish a ready window, login, or
+causal link to an earlier launch request.
+
 The native setup check is read-only: it accepts only FACEIT's fixed
 Anti-Cheat Launcher/service locations under Program Files, verifies their Windows trust,
 checks that the registered `FACEITService` has exactly that service binary,

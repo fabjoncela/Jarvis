@@ -23,9 +23,10 @@ use jarvis_storage::{
     Store, StoredPreference, StoredPreferenceTombstone,
 };
 use jarvis_windows::{
-    run_pre_match_handoff, verify_fixed_discord_launcher, InternalWorker, PreMatchHandoffError,
-    PreMatchHandoffReport, PreMatchSetupError, Win32Error, WindowsWorkerManager,
-    WorkerManagerError, WorkerManifest, WorkerProcessIdentity, WorkerShutdownReport,
+    observe_fixed_discord_process_count, run_pre_match_handoff, verify_fixed_discord_launcher,
+    DiscordProcessObservationError, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport,
+    PreMatchSetupError, Win32Error, WindowsWorkerManager, WorkerManagerError, WorkerManifest,
+    WorkerProcessIdentity, WorkerShutdownReport,
 };
 
 #[derive(Debug)]
@@ -105,6 +106,23 @@ impl fmt::Display for DiscordLaunchRequestError {
 }
 
 impl Error for DiscordLaunchRequestError {}
+
+#[derive(Debug)]
+pub enum DiscordStatusError {
+    Gate(GateError),
+    Observation(DiscordProcessObservationError),
+}
+
+impl fmt::Display for DiscordStatusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gate(error) => write!(formatter, "Discord status denied: {error:?}"),
+            Self::Observation(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for DiscordStatusError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HandoffAttemptState {
@@ -491,6 +509,23 @@ impl Supervisor {
             .start()
             .map_err(DiscordLaunchRequestError::Launch)?;
         Ok(request.request_id)
+    }
+
+    /// Read-only current-process observation in God Mode. Presence is not
+    /// attributed to a preceding launch request or treated as UI readiness.
+    pub fn discord_process_count(&self) -> Result<u32, DiscordStatusError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.authorize_discord_observation(request)?;
+        observe_fixed_discord_process_count().map_err(DiscordStatusError::Observation)
+    }
+
+    fn authorize_discord_observation(
+        &self,
+        request: RequestContext,
+    ) -> Result<(), DiscordStatusError> {
+        self.controller
+            .authorize_action(request)
+            .map_err(DiscordStatusError::Gate)
     }
 
     fn authorize_discord_request(
@@ -919,6 +954,36 @@ mod tests {
             Err(DiscordLaunchRequestError::Validation(
                 ValidationError::ProfileGate(GateError::StaleGeneration)
             ))
+        ));
+    }
+
+    #[test]
+    fn discord_status_is_denied_in_competitive_mode_before_native_observation() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        supervisor
+            .controller
+            .enter_competitive(TransitionCause::Manual);
+        assert!(matches!(
+            supervisor.discord_process_count(),
+            Err(DiscordStatusError::Gate(GateError::ProfileRestricted))
+        ));
+    }
+
+    #[test]
+    fn discord_status_rejects_a_stale_generation_after_restore() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let old = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        assert!(supervisor.authorize_discord_observation(old).is_ok());
+        supervisor
+            .controller
+            .enter_competitive(TransitionCause::Cs2Process);
+        supervisor
+            .controller
+            .finish_competitive_shutdown(ShutdownVerification::Clean);
+        supervisor.controller.restore_god_mode(false, true).unwrap();
+        assert!(matches!(
+            supervisor.authorize_discord_observation(old),
+            Err(DiscordStatusError::Gate(GateError::StaleGeneration))
         ));
     }
 
