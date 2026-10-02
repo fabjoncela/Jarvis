@@ -15,11 +15,13 @@ The workspace begins with the V1 sequence defined there:
 
 The current implementation validates the complete source-controlled
 configuration bundle before it constructs the router or registry. The current
-executable is validation-only: it creates no resident supervisor, process
-monitor, or worker. The code includes an empty opaque reviewed Win32 Job Object
-primitive, but worker launch is not implemented; the planned supervisor must
-use the suspended-create, assign, verify, resume sequence before a worker can
-run.
+executable is validation-only: it creates a serialized `Supervisor` for one
+CLI invocation, or keeps one alive through the explicit `--serve-stdin` loop.
+It has no Windows service, process monitor, or worker. That supervisor owns an
+empty opaque reviewed Win32 Job Object and a fixed manifest for the checked-in
+session worker. Worker launch is not implemented; the planned worker manager
+must use the suspended-create, assign, verify, resume sequence before a
+manifest worker can run.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.
