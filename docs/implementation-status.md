@@ -9,7 +9,7 @@ running desktop assistant:
    tokens.
 2. `apps/jarvis::Supervisor` is the sole mutable owner of configuration,
    profile policy, deterministic routing, action validation, the fixed worker
-   manifest, and an empty owned Job Object for a single CLI invocation.
+   manifest, and an owned Job Object for a single CLI invocation.
    `--serve-stdin` can keep that same serialized owner alive for the explicit
    `status`, `route <command>`, and `quit` console protocol.
 3. `jarvis-profiles` owns God Mode/Competitive Mode transitions and the action
@@ -25,17 +25,22 @@ running desktop assistant:
 7. `jarvis-windows-ffi` owns the only reviewed raw Win32 calls. It creates an
    unnamed Job Object with `KILL_ON_JOB_CLOSE`, and can start only the fixed
    session-worker enum entry under an installation directory: create suspended,
-   assign to the Job Object, verify membership, then resume.
+   assign to the Job Object, verify membership, then resume. It creates that
+   worker's fixed named exit event before resume, observes the exact process
+   handle and exit code, and never accepts a general IPC payload.
 8. `jarvis-windows` retains the in-memory adapter for policy tests, owns the
    fixed one-entry internal-worker manifest, and provides an opaque worker
-   manager. It exposes no API to open or adopt a PID, or launch a user-supplied
-   executable.
+   manager. It sends only the fixed cooperative-exit signal, waits a bounded
+   500 ms, falls back to terminating only its Job Object, verifies emptiness,
+   and permits restart only after that verified empty state. It exposes no API
+   to open or adopt a PID, or launch a user-supplied executable.
 9. `jarvis-gaming` models competitive transitions against testable in-memory
    lifecycle boundaries; it is not wired to a live detector or runtime.
 
 ## Explicitly not implemented
 
-- worker IPC, exit observation/restart, or a general worker lifecycle
+- general worker IPC, a multi-worker lifecycle, or any worker capability beyond
+  the fixed session worker's cooperative exit event
 - a Windows service, Windows process/service event subscriptions, or FACEIT
   identity verification
 - actual application, audio, browser, file, service, or system actions
@@ -44,7 +49,7 @@ running desktop assistant:
 
 ## Next milestone
 
-Add exit observation, bounded cooperative shutdown, verified Job Object
-emptiness, and safe restart behavior to the fixed internal-worker manager. Add
-ordinary process/service lifecycle observation and verify Competitive Mode
-containment before introducing a single action executor or AI/voice worker.
+Add ordinary process/service lifecycle observation and verify Competitive Mode
+containment with the real fixed-worker manager before introducing a single
+action executor or AI/voice worker. Keep detection fail-closed and do not add
+a general executable- or PID-based API.

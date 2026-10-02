@@ -16,7 +16,7 @@ use jarvis_profiles::{GateError, Profile, ProfileController};
 use jarvis_router::{RouteResult, Router};
 use jarvis_windows::{
     InternalWorker, Win32Error, WindowsWorkerManager, WorkerManagerError, WorkerManifest,
-    WorkerProcessIdentity,
+    WorkerProcessIdentity, WorkerShutdownReport,
 };
 
 #[derive(Debug)]
@@ -175,6 +175,15 @@ impl Supervisor {
         self.worker_manager
             .start(worker, installation_directory)
             .map_err(WorkerStartError::Manager)
+    }
+
+    /// Stops only processes in this supervisor's opaque worker Job Object.
+    /// The manager requests the fixed cooperative exit, waits a bounded time,
+    /// and verifies Job Object emptiness after any forced fallback.
+    pub fn shutdown_internal_workers(
+        &mut self,
+    ) -> Result<WorkerShutdownReport, WorkerManagerError> {
+        self.worker_manager.shutdown()
     }
 }
 

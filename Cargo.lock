@@ -83,8 +83,7 @@ dependencies = [
 name = "jarvis-session-worker"
 version = "0.1.0"
 dependencies = [
- "jarvis-core",
- "jarvis-profiles",
+ "jarvis-windows-ffi",
 ]
 
 [[package]]

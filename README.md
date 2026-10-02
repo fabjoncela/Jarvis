@@ -14,11 +14,12 @@ Its current V1 foundation has no desktop-action execution:
 - competitive-mode policy logic with testable in-memory worker lifecycles;
 - a fixed manifest for the checked-in `jarvis-session-worker.exe` binary, with
   a containment self-check that starts it suspended, assigns and verifies its
-  Job Object membership, then resumes it.
+  Job Object membership, then resumes it; it also verifies a bounded
+  cooperative exit and a safe restart after the Job Object is empty.
 
 No microphone capture, model loading, game interaction, or desktop automation
 is active in this scaffold. There is no resident event loop, CS2/FACEIT
-monitor, general worker lifecycle, or desktop action executor.
+monitor, general multi-worker lifecycle, or desktop action executor.
 The supervisor created for a CLI command owns its Job Object and is dropped when
 that command exits. The sole real process start is the fixed-worker containment
 self-check; it cannot launch a configured desktop application or arbitrary
@@ -65,9 +66,12 @@ executor.
 
 `--worker-self-check` starts only the checked-in session-worker binary beside
 the current `jarvis.exe`. It creates that worker suspended, assigns it to the
-owned Job Object, verifies membership, and only then resumes it. The command
-does not accept a user-provided executable path, PID, or command line, and it
-does not launch a configured desktop application.
+owned Job Object, verifies membership, and only then resumes it. It signals
+only the worker's fixed cooperative-exit event, verifies the Job Object becomes
+empty, and repeats the cycle to verify restart readiness. A 500 ms bound
+precedes a Job-Object-only forced-termination fallback. The command does not
+accept a user-provided executable path, PID, or command line, and it does not
+launch a configured desktop application.
 
 Runtime data will eventually live under `%LOCALAPPDATA%\Jarvis`, never in the
 repository. Model files, recordings, credentials, and live databases must not

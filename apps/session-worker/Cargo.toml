@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-jarvis-core = { path = "../../crates/jarvis-core" }
-jarvis-profiles = { path = "../../crates/jarvis-profiles" }
+jarvis-windows-ffi = { path = "../../crates/jarvis-windows-ffi" }
 
 [lints]
 workspace = true

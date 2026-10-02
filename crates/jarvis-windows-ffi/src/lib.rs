@@ -15,8 +15,12 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
+use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, FILETIME, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, FILETIME, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
     JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
@@ -25,8 +29,9 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetProcessTimes, ResumeThread, TerminateProcess, CREATE_SUSPENDED,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CreateEventW, CreateProcessW, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess,
+    GetProcessTimes, OpenEventW, ResumeThread, SetEvent, TerminateProcess, WaitForSingleObject,
+    CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION, STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE,
 };
 
 /// A Win32 call failed. Error codes are retained for local diagnostics without
@@ -86,6 +91,7 @@ pub enum WorkerLaunchError {
     },
     NotRegularFile,
     OutsideInstallationDirectory,
+    ShutdownSignalAlreadyExists,
     Win32(Win32Error),
     NotAssignedToExpectedJob,
 }
@@ -108,6 +114,12 @@ impl fmt::Display for WorkerLaunchError {
                     "the fixed internal worker must resolve inside its installation directory"
                 )
             }
+            Self::ShutdownSignalAlreadyExists => {
+                write!(
+                    formatter,
+                    "the fixed worker shutdown signal name already exists"
+                )
+            }
             Self::Win32(error) => error.fmt(formatter),
             Self::NotAssignedToExpectedJob => {
                 write!(
@@ -126,6 +138,7 @@ impl Error for WorkerLaunchError {
             Self::Win32(error) => Some(error),
             Self::NotRegularFile
             | Self::OutsideInstallationDirectory
+            | Self::ShutdownSignalAlreadyExists
             | Self::NotAssignedToExpectedJob => None,
         }
     }
@@ -295,10 +308,26 @@ impl KillOnCloseJob {
             }
         };
 
+        let shutdown_signal = match CooperativeShutdownSignal::create(worker, identity) {
+            Ok(signal) => signal,
+            Err(error) => {
+                // SAFETY: CreateProcessW returned valid owned handles. The
+                // child is still suspended, so terminating and closing it here
+                // prevents an unassigned process from surviving setup failure.
+                unsafe {
+                    let _ = TerminateProcess(process_information.hProcess, 1);
+                    let _ = CloseHandle(process_information.hThread);
+                    let _ = CloseHandle(process_information.hProcess);
+                }
+                return Err(error);
+            }
+        };
+
         Ok(SuspendedInternalWorker {
             process: process_information.hProcess,
             primary_thread: process_information.hThread,
             identity,
+            shutdown_signal: Some(shutdown_signal),
         })
     }
 
@@ -373,6 +402,7 @@ pub struct SuspendedInternalWorker {
     process: HANDLE,
     primary_thread: HANDLE,
     identity: InternalWorkerIdentity,
+    shutdown_signal: Option<CooperativeShutdownSignal>,
 }
 
 impl SuspendedInternalWorker {
@@ -404,6 +434,10 @@ impl SuspendedInternalWorker {
         Ok(RunningInternalWorker {
             process,
             identity: self.identity,
+            shutdown_signal: self
+                .shutdown_signal
+                .take()
+                .expect("suspended worker always owns its shutdown signal"),
         })
     }
 }
@@ -433,12 +467,44 @@ impl Drop for SuspendedInternalWorker {
 pub struct RunningInternalWorker {
     process: HANDLE,
     identity: InternalWorkerIdentity,
+    shutdown_signal: CooperativeShutdownSignal,
 }
 
 impl RunningInternalWorker {
     #[must_use]
     pub const fn identity(&self) -> InternalWorkerIdentity {
         self.identity
+    }
+
+    /// Signals the fixed worker's sole cooperative operation: exit. It cannot
+    /// carry a command, argument, executable path, or arbitrary IPC payload.
+    pub fn request_cooperative_shutdown(&self) -> Result<(), Win32Error> {
+        self.shutdown_signal.signal()
+    }
+
+    /// Observes whether the exact process handle has exited. The identity was
+    /// captured before resume, so this never follows a reused PID.
+    pub fn wait_for_exit(&self, timeout: Duration) -> Result<bool, Win32Error> {
+        match wait_for_handle(self.process, timeout)? {
+            WaitState::Signaled => Ok(true),
+            WaitState::TimedOut => Ok(false),
+        }
+    }
+
+    /// Returns the worker exit code only after the exact process handle is
+    /// observed signaled. It never queries a PID that could have been reused.
+    pub fn exited_with_code(&self) -> Result<Option<u32>, Win32Error> {
+        if !self.wait_for_exit(Duration::ZERO)? {
+            return Ok(None);
+        }
+        let mut exit_code = 0;
+        // SAFETY: `process` is the still-owned process handle returned by
+        // CreateProcessW, and `exit_code` is a valid writable output location.
+        let queried = unsafe { GetExitCodeProcess(self.process, &mut exit_code) };
+        if queried == 0 {
+            return Err(last_error("GetExitCodeProcess"));
+        }
+        Ok(Some(exit_code))
     }
 }
 
@@ -461,6 +527,118 @@ impl Drop for KillOnCloseJob {
         unsafe {
             let _ = CloseHandle(self.handle);
         }
+    }
+}
+
+/// Waits for the current fixed worker's manager-created shutdown event. This
+/// is the only worker-side control operation currently supported.
+pub fn wait_for_current_fixed_worker_shutdown(
+    worker: FixedInternalWorker,
+) -> Result<(), Win32Error> {
+    // SAFETY: GetCurrentProcess returns the documented pseudo-handle for this
+    // process, and GetCurrentProcessId has no pointer requirements.
+    let identity = process_identity(unsafe { GetCurrentProcess() }, unsafe {
+        GetCurrentProcessId()
+    })?;
+    let name = shutdown_signal_name(worker, identity);
+    // SAFETY: `name` is a null-terminated UTF-16 value that remains live for
+    // this synchronous call. The worker asks only for wait/synchronize access
+    // to its own manager-created event and does not inherit the handle.
+    let event = unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
+    if event.is_null() {
+        return Err(last_error("OpenEventW"));
+    }
+    let result = wait_for_handle(event, Duration::from_millis(u64::from(INFINITE)));
+    // SAFETY: `event` was returned as an owned handle by OpenEventW and is not
+    // used after this close.
+    unsafe {
+        let _ = CloseHandle(event);
+    }
+    match result? {
+        WaitState::Signaled => Ok(()),
+        WaitState::TimedOut => Err(Win32Error {
+            operation: "WaitForSingleObject unexpectedly timed out",
+            code: WAIT_TIMEOUT,
+        }),
+    }
+}
+
+/// An owned, per-worker named event created before the worker is resumed.
+/// Its name includes both PID and creation time, preventing PID reuse from
+/// addressing a later worker. A pre-existing name is rejected rather than
+/// reused.
+struct CooperativeShutdownSignal {
+    handle: HANDLE,
+}
+
+impl CooperativeShutdownSignal {
+    fn create(
+        worker: FixedInternalWorker,
+        identity: InternalWorkerIdentity,
+    ) -> Result<Self, WorkerLaunchError> {
+        let name = shutdown_signal_name(worker, identity);
+        // SAFETY: The event is non-inheritable by passing null security
+        // attributes, starts nonsignaled, and uses a null-terminated UTF-16
+        // name that remains live for this synchronous call.
+        let handle = unsafe { CreateEventW(null(), 1, 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(WorkerLaunchError::Win32(last_error("CreateEventW")));
+        }
+        // SAFETY: CreateEventW documents GetLastError as ERROR_ALREADY_EXISTS
+        // when it opens an existing named event. This read is immediately
+        // after the call, before any other Win32 operation.
+        let already_exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        if already_exists {
+            // SAFETY: `handle` is the just-opened event handle and is owned by
+            // this function until it is returned.
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(WorkerLaunchError::ShutdownSignalAlreadyExists);
+        }
+        Ok(Self { handle })
+    }
+
+    fn signal(&self) -> Result<(), Win32Error> {
+        // SAFETY: `handle` is a live event handle owned by this wrapper. The
+        // event carries no payload; signaling it can only request worker exit.
+        let signaled = unsafe { SetEvent(self.handle) };
+        if signaled == 0 {
+            return Err(last_error("SetEvent"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CooperativeShutdownSignal {
+    fn drop(&mut self) {
+        // SAFETY: The named event handle is owned exactly once by this
+        // wrapper. Closing it cannot affect any desktop process.
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitState {
+    Signaled,
+    TimedOut,
+}
+
+fn wait_for_handle(handle: HANDLE, timeout: Duration) -> Result<WaitState, Win32Error> {
+    let timeout_millis = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
+    // SAFETY: `handle` is a live process or event handle owned by the caller,
+    // and the bounded timeout is passed by value to this synchronous wait.
+    let result = unsafe { WaitForSingleObject(handle, timeout_millis) };
+    match result {
+        WAIT_OBJECT_0 => Ok(WaitState::Signaled),
+        WAIT_TIMEOUT => Ok(WaitState::TimedOut),
+        WAIT_FAILED => Err(last_error("WaitForSingleObject")),
+        unexpected => Err(Win32Error {
+            operation: "WaitForSingleObject returned an unexpected state",
+            code: unexpected,
+        }),
     }
 }
 
@@ -490,6 +668,16 @@ fn process_identity(
         process_id,
         creation_time_filetime: filetime_value(created),
     })
+}
+
+fn shutdown_signal_name(worker: FixedInternalWorker, identity: InternalWorkerIdentity) -> Vec<u16> {
+    let name = format!(
+        "Local\\Jarvis.{}.Shutdown.{}.{}",
+        worker.executable_name(),
+        identity.process_id(),
+        identity.creation_time_filetime()
+    );
+    name.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn wide_null(path: &Path) -> Vec<u16> {

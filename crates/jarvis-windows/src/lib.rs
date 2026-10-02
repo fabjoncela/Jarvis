@@ -10,6 +10,8 @@
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use jarvis_core::ProfileGeneration;
 use jarvis_windows_ffi::{
@@ -240,6 +242,14 @@ pub struct WorkerProcessIdentity {
     creation_time_filetime: u64,
 }
 
+/// The result of stopping the fixed worker set. A clean report is issued only
+/// after the owned Job Object reports no active process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerShutdownReport {
+    pub used_forced_termination: bool,
+    pub all_workers_exited_successfully: bool,
+}
+
 impl WorkerProcessIdentity {
     #[must_use]
     pub const fn worker(self) -> InternalWorker {
@@ -260,6 +270,8 @@ impl WorkerProcessIdentity {
 #[derive(Debug)]
 pub enum WorkerManagerError {
     AlreadyRunning(InternalWorker),
+    OwnedJobNotEmpty { active_processes: u32 },
+    ShutdownIncomplete { active_processes: u32 },
     Launch(WorkerLaunchError),
     Job(Win32Error),
 }
@@ -270,6 +282,14 @@ impl fmt::Display for WorkerManagerError {
             Self::AlreadyRunning(worker) => {
                 write!(formatter, "{worker:?} worker is already running")
             }
+            Self::OwnedJobNotEmpty { active_processes } => write!(
+                formatter,
+                "the owned Job Object still contains {active_processes} process(es)"
+            ),
+            Self::ShutdownIncomplete { active_processes } => write!(
+                formatter,
+                "the owned Job Object still contains {active_processes} process(es) after forced termination"
+            ),
             Self::Launch(error) => error.fmt(formatter),
             Self::Job(error) => error.fmt(formatter),
         }
@@ -279,7 +299,9 @@ impl fmt::Display for WorkerManagerError {
 impl Error for WorkerManagerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::AlreadyRunning(_) => None,
+            Self::AlreadyRunning(_)
+            | Self::OwnedJobNotEmpty { .. }
+            | Self::ShutdownIncomplete { .. } => None,
             Self::Launch(error) => Some(error),
             Self::Job(error) => Some(error),
         }
@@ -288,7 +310,7 @@ impl Error for WorkerManagerError {
 
 struct ManagedWorker {
     identity: WorkerProcessIdentity,
-    _process: RunningInternalWorker,
+    process: RunningInternalWorker,
 }
 
 /// Trusted manager for the fixed internal-worker manifest. It intentionally
@@ -300,6 +322,10 @@ pub struct WindowsWorkerManager {
 }
 
 impl WindowsWorkerManager {
+    const COOPERATIVE_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(500);
+    const FORCED_TERMINATION_VERIFICATION_DEADLINE: Duration = Duration::from_millis(500);
+    const EMPTY_JOB_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
     pub fn create() -> Result<Self, Win32Error> {
         Ok(Self {
             job: WindowsOwnedWorkerJob::create()?,
@@ -316,6 +342,7 @@ impl WindowsWorkerManager {
         worker: InternalWorker,
         installation_directory: &Path,
     ) -> Result<WorkerProcessIdentity, WorkerManagerError> {
+        self.reconcile_for_start()?;
         if self
             .workers
             .iter()
@@ -329,11 +356,118 @@ impl WindowsWorkerManager {
             .start_fixed_worker(worker, installation_directory)
             .map_err(WorkerManagerError::Launch)?;
         let identity = worker_identity(worker, process.identity());
-        self.workers.push(ManagedWorker {
-            identity,
-            _process: process,
-        });
+        self.workers.push(ManagedWorker { identity, process });
         Ok(identity)
+    }
+
+    /// Requests the fixed workers' one cooperative operation, exit, then waits
+    /// a bounded interval for the owned Job Object to become empty. If that
+    /// does not happen, it terminates only this Job Object and independently
+    /// verifies that the kernel reports no remaining member process.
+    pub fn shutdown(&mut self) -> Result<WorkerShutdownReport, WorkerManagerError> {
+        if self
+            .active_process_count()
+            .map_err(WorkerManagerError::Job)?
+            == 0
+        {
+            let all_workers_exited_successfully = self.all_workers_exited_successfully()?;
+            self.workers.clear();
+            return Ok(WorkerShutdownReport {
+                used_forced_termination: false,
+                all_workers_exited_successfully,
+            });
+        }
+
+        let mut all_signals_delivered = true;
+        for managed in &self.workers {
+            if managed.process.request_cooperative_shutdown().is_err() {
+                all_signals_delivered = false;
+            }
+        }
+        if all_signals_delivered && self.wait_until_empty(Self::COOPERATIVE_SHUTDOWN_DEADLINE)? {
+            let all_workers_exited_successfully = self.all_workers_exited_successfully()?;
+            self.workers.clear();
+            return Ok(WorkerShutdownReport {
+                used_forced_termination: false,
+                all_workers_exited_successfully,
+            });
+        }
+
+        self.job
+            .job
+            .terminate_all(1)
+            .map_err(WorkerManagerError::Job)?;
+        if self.wait_until_empty(Self::FORCED_TERMINATION_VERIFICATION_DEADLINE)? {
+            self.workers.clear();
+            return Ok(WorkerShutdownReport {
+                used_forced_termination: true,
+                all_workers_exited_successfully: false,
+            });
+        }
+
+        Err(WorkerManagerError::ShutdownIncomplete {
+            active_processes: self
+                .active_process_count()
+                .map_err(WorkerManagerError::Job)?,
+        })
+    }
+
+    /// Drops identities for workers known to have exited only when the Job
+    /// Object is empty. An exited parent with a surviving owned child blocks
+    /// restart rather than allowing another worker to be created.
+    fn reconcile_for_start(&mut self) -> Result<(), WorkerManagerError> {
+        let active_processes = self
+            .active_process_count()
+            .map_err(WorkerManagerError::Job)?;
+        if active_processes == 0 {
+            self.workers.clear();
+            return Ok(());
+        }
+
+        let all_known_workers_exited = self
+            .workers
+            .iter()
+            .try_fold(true, |all_exited, managed| {
+                managed
+                    .process
+                    .wait_for_exit(Duration::ZERO)
+                    .map(|exited| all_exited && exited)
+            })
+            .map_err(WorkerManagerError::Job)?;
+        if self.workers.is_empty() || all_known_workers_exited {
+            return Err(WorkerManagerError::OwnedJobNotEmpty { active_processes });
+        }
+        Ok(())
+    }
+
+    fn wait_until_empty(&self, timeout: Duration) -> Result<bool, WorkerManagerError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .active_process_count()
+                .map_err(WorkerManagerError::Job)?
+                == 0
+            {
+                return Ok(true);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            thread::sleep(remaining.min(Self::EMPTY_JOB_POLL_INTERVAL));
+        }
+    }
+
+    fn all_workers_exited_successfully(&self) -> Result<bool, WorkerManagerError> {
+        self.workers
+            .iter()
+            .try_fold(true, |all_succeeded, managed| {
+                managed
+                    .process
+                    .exited_with_code()
+                    .map(|exit_code| all_succeeded && exit_code == Some(0))
+            })
+            .map_err(WorkerManagerError::Job)
     }
 }
 
@@ -390,5 +524,18 @@ mod tests {
                 executable_name: "jarvis-session-worker.exe",
             }
         );
+    }
+
+    #[test]
+    fn empty_worker_manager_has_a_verified_clean_shutdown() {
+        let mut manager = WindowsWorkerManager::create().expect("create empty worker manager");
+        assert_eq!(
+            manager.shutdown().expect("verify empty Job Object"),
+            WorkerShutdownReport {
+                used_forced_termination: false,
+                all_workers_exited_successfully: true,
+            }
+        );
+        assert_eq!(manager.active_process_count().expect("query empty job"), 0);
     }
 }

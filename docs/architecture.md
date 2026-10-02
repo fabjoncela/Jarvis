@@ -22,8 +22,11 @@ reviewed Win32 Job Object and a fixed manifest for the checked-in session
 worker. Its explicit containment self-check is the only implemented worker
 start: it creates that manifest worker suspended, assigns and verifies its Job
 Object membership, then resumes it. The check accepts neither a user path nor
-a PID. General worker lifecycle management, detection, and additional worker
-types are not implemented.
+a PID. The one session worker can receive only its manager-created cooperative
+exit event; the manager observes its exact process handle, bounds cooperative
+exit, verifies Job Object emptiness after any forced fallback, and allows a
+restart only from an empty Job Object. General multi-worker lifecycle
+management, detection, and additional worker types are not implemented.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.

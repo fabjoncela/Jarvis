@@ -62,7 +62,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "fixed-worker containment: available only through --worker-self-check; general lifecycle: not implemented"
+        "fixed-worker lifecycle: available only through --worker-self-check; general multi-worker lifecycle: not implemented"
     )
     .map_err(io_error)?;
     writeln!(output, "supervisor policy state: {:?}", status.profile).map_err(io_error)?;
@@ -205,9 +205,11 @@ fn worker_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
     let installation_directory = executable.parent().ok_or_else(|| {
         "could not determine the current executable's installation directory".to_owned()
     })?;
-    let identity = supervisor
-        .start_internal_worker(InternalWorker::Session, installation_directory)
-        .map_err(|error| format!("worker self-check failed: {error}"))?;
+    let identity = checked_worker_cycle(supervisor, installation_directory)?;
+    let restarted_identity = checked_worker_cycle(supervisor, installation_directory)?;
+    if identity == restarted_identity {
+        return Err("worker restart self-check retained a stale process identity".to_owned());
+    }
     println!("Jarvis owned-worker containment self-check");
     println!("worker: {:?}", identity.worker());
     println!("process id: {}", identity.process_id());
@@ -215,8 +217,29 @@ fn worker_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
     println!(
         "sequence: created suspended, assigned to the owned Job Object, membership verified, then resumed"
     );
+    println!("shutdown: fixed cooperative exit observed; Job Object verified empty");
+    println!(
+        "restart: second fixed worker started only after the empty Job Object verification (process id: {})",
+        restarted_identity.process_id()
+    );
     println!("execution: no configured desktop action or user application was launched");
     Ok(())
+}
+
+fn checked_worker_cycle(
+    supervisor: &mut Supervisor,
+    installation_directory: &Path,
+) -> Result<jarvis_windows::WorkerProcessIdentity, String> {
+    let identity = supervisor
+        .start_internal_worker(InternalWorker::Session, installation_directory)
+        .map_err(|error| format!("worker self-check failed: {error}"))?;
+    let shutdown = supervisor
+        .shutdown_internal_workers()
+        .map_err(|error| format!("worker self-check shutdown failed: {error}"))?;
+    if shutdown.used_forced_termination || !shutdown.all_workers_exited_successfully {
+        return Err("worker self-check did not observe a clean cooperative worker exit".to_owned());
+    }
+    Ok(identity)
 }
 
 fn config_directory() -> Result<PathBuf, String> {
