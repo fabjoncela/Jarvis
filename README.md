@@ -41,6 +41,8 @@ See [docs/implementation-status.md](docs/implementation-status.md). The full
 architecture specification is maintained at
 `C:\Users\Admin\codex-memory\JARVIS.md`; this repository implements it in
 small, testable milestones.
+The [future architecture compatibility plan](docs/future-architecture-compatibility.md)
+records proposed post-current-version upgrades without enabling them.
 
 ## Prerequisites
 
