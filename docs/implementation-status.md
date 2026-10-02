@@ -117,6 +117,13 @@ pre-match launch sequence, not a running desktop assistant:
     Discord image location, and Windows trust, and reports the process count.
     A failed or mismatched candidate makes the state unknown. Presence is
     never attributed to a launch receipt or promoted to UI/login readiness.
+20. The fixed Discord launch receipt now includes a `FEEDBACK_REF`. The
+    `--feedback-discord <reference> worked|failed` CLI attaches one RAM-only
+    report to the exact latest dispatch through `jarvis-verification`. Wrong,
+    superseded, conflicting, late, or stale-generation reports are rejected;
+    identical retries are idempotent. Competitive entry cancels pending
+    verification. User feedback cannot produce a machine-verified outcome or
+    persist experience for learning.
 
 ## Explicitly not implemented
 
@@ -131,7 +138,7 @@ pre-match launch sequence, not a running desktop assistant:
 - general desktop application, audio, browser, file, service, or system action
   execution; only the fixed confirmation-gated pre-match sequence and the
   fixed Discord command can currently launch user applications
-- general-purpose memory commands or a learning pipeline, general-purpose IPC, tray
+- general-purpose memory/feedback commands or a learning pipeline, general-purpose IPC, tray
   UI, microphone, STT, TTS, Qwen, or learning workers
 
 ## Measurement result (2 October 2026)

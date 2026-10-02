@@ -1,7 +1,7 @@
 # Architecture implementation guide
 
 The authoritative design specification is
-`C:\Users\Admin\codex-memory\JARVIS.md` (revision 1.1, 1 October 2026).
+`C:\Users\Admin\codex-memory\JARVIS.md` (revision 1.2, 3 October 2026).
 The additive, non-implementing future-version compatibility note is
 [future-architecture-compatibility.md](future-architecture-compatibility.md).
 

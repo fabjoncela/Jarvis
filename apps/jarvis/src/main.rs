@@ -21,6 +21,7 @@ use jarvis_actions::Action;
 use jarvis_config::ValidatedConfiguration;
 use jarvis_router::{RouteResult, Router};
 use jarvis_storage::{EventId, PreferenceKey, ReferenceId};
+use jarvis_verification::{FeedbackKind, RecordResult};
 
 use jarvis_gaming::{
     pre_match_setup_status, DetectionHealth, FailClosedTriggerDetector, PreMatchSetupStatus,
@@ -29,8 +30,8 @@ use jarvis_gaming::{
 use jarvis_profiles::{Profile, TransitionCause, TransitionState};
 use jarvis_windows::{
     observe_competitive_activity, send_supervisor_control_request, verify_default_pre_match_setup,
-    CompetitiveLifecycleNotifications, InternalWorker, PreferredApp, SupervisorControlCommand,
-    SupervisorControlPipeServer,
+    CompetitiveLifecycleNotifications, DiscordFeedback, InternalWorker, PreferredApp,
+    SupervisorControlCommand, SupervisorControlPipeServer,
 };
 use supervisor::{ActivityReconciliation, RouteOutcome, Supervisor};
 
@@ -57,6 +58,9 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
         [flag] if flag == "--discord-status" => return discord_status(),
+        [flag, reference, kind] if flag == "--feedback-discord" => {
+            return feedback_discord(reference, kind);
+        }
         [flag, command] if flag == "--execute" => {
             return execute_text_command(command, configuration_directory);
         }
@@ -91,7 +95,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --feedback-discord <reference> <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -660,9 +664,9 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 return Ok("ERR POLICY".to_owned());
             }
             match supervisor.open_discord() {
-                Ok(request) => {
+                Ok((request, reference)) => {
                     let _ = monitor_cycle(supervisor, detector, last_report)?;
-                    Ok(format!("OK DISCORD_LAUNCH_REQUESTED REQUEST={request} OUTCOME=UNVERIFIED"))
+                    Ok(format!("OK DISCORD_LAUNCH_REQUESTED REQUEST={request} FEEDBACK_REF={reference:032x} OUTCOME=UNVERIFIED"))
                 }
                 Err(error) => {
                     eprintln!("authoritative Discord launch denied or failed: {error}");
@@ -684,6 +688,23 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                     eprintln!("Discord status observation unavailable: {error}");
                     let _ = monitor_cycle(supervisor, detector, last_report)?;
                     Ok("ERR DISCORD_STATUS_UNKNOWN".to_owned())
+                }
+            }
+        }
+        SupervisorControlCommand::FeedbackDiscord { reference, kind } => {
+            if !status.action_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            let feedback = match kind {
+                DiscordFeedback::Worked => FeedbackKind::Worked,
+                DiscordFeedback::Failed => FeedbackKind::Failed,
+            };
+            match supervisor.record_discord_feedback(reference, feedback) {
+                Ok(RecordResult::Recorded) => Ok("OK DISCORD_FEEDBACK RECORDED OUTCOME=UNVERIFIED".to_owned()),
+                Ok(RecordResult::AlreadyRecorded) => Ok("OK DISCORD_FEEDBACK ALREADY_RECORDED OUTCOME=UNVERIFIED".to_owned()),
+                Err(error) => {
+                    eprintln!("Discord feedback rejected: {error:?}");
+                    Ok("ERR DISCORD_FEEDBACK".to_owned())
                 }
             }
         }
@@ -915,7 +936,43 @@ fn open_discord() -> Result<(), String> {
     }
     println!("{response}");
     println!("Launch request accepted; Discord startup or window state was not verified.");
+    println!("You can report this exact request with --feedback-discord <FEEDBACK_REF> worked|failed within five minutes.");
     Ok(())
+}
+
+fn feedback_discord(reference: &str, kind: &str) -> Result<(), String> {
+    if reference.len() != 32
+        || !reference
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("feedback reference must be the 32-character lowercase hex value from the launch receipt".to_owned());
+    }
+    let reference =
+        u128::from_str_radix(reference, 16).map_err(|_| "invalid feedback reference".to_owned())?;
+    let kind = match kind {
+        "worked" => DiscordFeedback::Worked,
+        "failed" => DiscordFeedback::Failed,
+        _ => return Err("feedback must be worked or failed".to_owned()),
+    };
+    let response = send_supervisor_control_request(SupervisorControlCommand::FeedbackDiscord {
+        reference,
+        kind,
+    })
+    .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+    match response.as_str() {
+        "OK DISCORD_FEEDBACK RECORDED OUTCOME=UNVERIFIED" => {
+            println!("Feedback recorded for that Discord launch. This is a user report, not machine verification.");
+            Ok(())
+        }
+        "OK DISCORD_FEEDBACK ALREADY_RECORDED OUTCOME=UNVERIFIED" => {
+            println!("That feedback was already recorded; it was not counted twice.");
+            Ok(())
+        }
+        "ERR POLICY" => Err("Discord feedback is disabled in Competitive Mode".to_owned()),
+        "ERR DISCORD_FEEDBACK" => Err("feedback rejected: reference is stale, unknown, expired, or conflicts with an earlier report".to_owned()),
+        _ => Err("authoritative supervisor returned an invalid feedback response".to_owned()),
+    }
 }
 
 fn discord_status() -> Result<(), String> {

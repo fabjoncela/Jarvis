@@ -13,7 +13,7 @@ mod control_pipe;
 mod lifecycle_notifications;
 
 pub use control_pipe::{
-    send_supervisor_control_request, PreferredApp, SupervisorControlCommand,
+    send_supervisor_control_request, DiscordFeedback, PreferredApp, SupervisorControlCommand,
     SupervisorControlPipeError, SupervisorControlPipeServer,
 };
 pub use lifecycle_notifications::{

@@ -13,6 +13,7 @@ jarvis-gaming = { path = "../../crates/jarvis-gaming" }
 jarvis-profiles = { path = "../../crates/jarvis-profiles" }
 jarvis-router = { path = "../../crates/jarvis-router" }
 jarvis-storage = { path = "../../crates/jarvis-storage" }
+jarvis-verification = { path = "../../crates/jarvis-verification" }
 jarvis-windows = { path = "../../crates/jarvis-windows" }
 
 [dev-dependencies]

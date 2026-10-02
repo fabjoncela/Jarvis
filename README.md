@@ -17,7 +17,8 @@ plus one fixed Discord launcher:
 - typed, allowlisted action plans;
 - deterministic alias and volume-pattern routing;
 - bounded RAM-only session-context and result-verification contracts (not yet
-  wired to live action execution);
+  wired to trusted machine observation; the Discord launch has an exact,
+  short-lived, RAM-only user-feedback anchor);
 - a private SQLite store for explicit preferred-app memory, revision-bound
   clear/restore, and backup before an existing database migration;
 - competitive-mode policy logic with testable in-memory worker lifecycles;
@@ -164,6 +165,14 @@ processes under the fixed versioned local installation. It is denied during
 Competitive Mode and reports unknown if a Discord-named candidate cannot be
 verified. A process count does not prove a ready window, login, or that a
 specific Jarvis request started it.
+
+After `--open-discord` or a Discord `--execute` request, the receipt includes a
+`FEEDBACK_REF`. Within five minutes, `--feedback-discord <FEEDBACK_REF>
+worked|failed` attaches one explicit report to that exact latest Discord
+dispatch. Duplicate identical reports are idempotent, conflicting reports are
+rejected, and Competitive Mode or a profile-generation change invalidates the
+anchor. Feedback is RAM-only and disappears when the monitor exits. It is not
+machine verification and never proves Discord became ready.
 
 `--pre-match-setup-self-check` verifies that exact local handoff setup without
 starting anything: fixed Program Files locations, valid Windows Authenticode

@@ -43,6 +43,22 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024;
 const REMEMBER_PREFERRED_APP_PREFIX: &str = "JARVIS/1 REMEMBER_PREFERRED_APP ";
 const FORGET_PREFERRED_APP_PREFIX: &str = "JARVIS/1 FORGET_PREFERRED_APP ";
 const RESTORE_PREFERRED_APP_PREFIX: &str = "JARVIS/1 RESTORE_PREFERRED_APP ";
+const FEEDBACK_DISCORD_PREFIX: &str = "JARVIS/1 FEEDBACK_DISCORD ";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscordFeedback {
+    Worked,
+    Failed,
+}
+
+impl DiscordFeedback {
+    const fn wire(self) -> &'static str {
+        match self {
+            Self::Worked => "WORKED",
+            Self::Failed => "FAILED",
+        }
+    }
+}
 
 /// The complete set of application references accepted by the preferred-app
 /// control protocol. These are identifiers, never executable paths.
@@ -83,6 +99,10 @@ pub enum SupervisorControlCommand {
     LastHandoff,
     OpenDiscord,
     DiscordStatus,
+    FeedbackDiscord {
+        reference: u128,
+        kind: DiscordFeedback,
+    },
     PrepareFaceitCs2,
     WorkerSelfCheck,
     RememberPreferredApp {
@@ -112,6 +132,8 @@ impl SupervisorControlCommand {
             Self::LastHandoff => b"JARVIS/1 LAST_HANDOFF".to_vec(),
             Self::OpenDiscord => b"JARVIS/1 OPEN_DISCORD".to_vec(),
             Self::DiscordStatus => b"JARVIS/1 DISCORD_STATUS".to_vec(),
+            Self::FeedbackDiscord { reference, kind } =>
+                format!("{FEEDBACK_DISCORD_PREFIX}{reference:032x} {}", kind.wire()).into_bytes(),
             Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2".to_vec(),
             Self::WorkerSelfCheck => b"JARVIS/1 WORKER_SELF_CHECK".to_vec(),
             Self::RememberPreferredApp {
@@ -147,6 +169,19 @@ impl SupervisorControlCommand {
             b"JARVIS/1 PREFERRED_APP_STATE" => Some(Self::PreferredAppState),
             _ => {
                 let text = std::str::from_utf8(bytes).ok()?;
+                if let Some(fields) = text.strip_prefix(FEEDBACK_DISCORD_PREFIX) {
+                    let mut parts = fields.split(' ');
+                    let reference = parse_event_id(parts.next()?)?;
+                    let kind = match parts.next()? {
+                        "WORKED" => DiscordFeedback::Worked,
+                        "FAILED" => DiscordFeedback::Failed,
+                        _ => return None,
+                    };
+                    return parts
+                        .next()
+                        .is_none()
+                        .then_some(Self::FeedbackDiscord { reference, kind });
+                }
                 if let Some(fields) = text.strip_prefix(FORGET_PREFERRED_APP_PREFIX) {
                     let mut parts = fields.split(' ');
                     let event_id = parse_event_id(parts.next()?)?;
@@ -722,6 +757,26 @@ mod tests {
 
     #[test]
     fn wire_parser_rejects_arbitrary_payloads() {
+        for kind in [DiscordFeedback::Worked, DiscordFeedback::Failed] {
+            let command = SupervisorControlCommand::FeedbackDiscord {
+                reference: 0x1234,
+                kind,
+            };
+            assert_eq!(
+                SupervisorControlCommand::parse(&command.wire()),
+                Some(command)
+            );
+        }
+        assert_eq!(
+            SupervisorControlCommand::parse(
+                b"JARVIS/1 FEEDBACK_DISCORD 00000000000000000000000000001234 MAYBE"
+            ),
+            None
+        );
+        assert_eq!(
+            SupervisorControlCommand::parse(b"JARVIS/1 FEEDBACK_DISCORD 1234 WORKED"),
+            None
+        );
         assert_eq!(
             SupervisorControlCommand::parse(b"JARVIS/1 STATUS"),
             Some(SupervisorControlCommand::Status)

@@ -7,7 +7,7 @@
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, ValidationError};
 use jarvis_config::{ConfigError, FaceitSetupStatus, ValidatedConfiguration};
@@ -21,6 +21,10 @@ use jarvis_router::{RouteResult, Router};
 use jarvis_storage::{
     CanonicalId, CorrectionTerm, EventId, PreferenceKey, RecordOutcome, ReferenceId, StorageError,
     Store, StoredPreference, StoredPreferenceTombstone,
+};
+use jarvis_verification::{
+    DispatchState, ExecutionAnchor, ExecutionId, FeedbackKind, RecordResult, UserFeedback,
+    VerificationCase, VerificationError,
 };
 use jarvis_windows::{
     observe_fixed_discord_process_count, run_pre_match_handoff, verify_fixed_discord_launcher,
@@ -89,6 +93,18 @@ pub enum DiscordLaunchRequestError {
     UnexpectedConfirmation,
     Setup(PreMatchSetupError),
     Launch(Win32Error),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscordFeedbackError {
+    Gate(GateError),
+    UnknownExecution,
+    Verification(VerificationError),
+}
+
+struct DiscordExecution {
+    reference: u128,
+    case: VerificationCase,
 }
 
 impl fmt::Display for DiscordLaunchRequestError {
@@ -285,6 +301,7 @@ pub struct Supervisor {
     worker_manager: WindowsWorkerManager,
     healthy_clear_since: Option<Instant>,
     last_handoff_attempt: Option<LastHandoffAttempt>,
+    last_discord_execution: Option<DiscordExecution>,
 }
 
 impl Supervisor {
@@ -313,6 +330,7 @@ impl Supervisor {
             worker_manager,
             healthy_clear_since: None,
             last_handoff_attempt: None,
+            last_discord_execution: None,
         })
     }
 
@@ -498,7 +516,7 @@ impl Supervisor {
     /// Executes only the configured Discord launch action. The registry and
     /// profile gate are checked before FFI, and the same generation is checked
     /// again immediately before the fixed native launch path.
-    pub fn open_discord(&mut self) -> Result<RequestId, DiscordLaunchRequestError> {
+    pub fn open_discord(&mut self) -> Result<(RequestId, u128), DiscordLaunchRequestError> {
         let request = RequestContext::new(RequestId::next(), self.controller.generation());
         self.authorize_discord_request(request)?;
         let launcher = verify_fixed_discord_launcher().map_err(DiscordLaunchRequestError::Setup)?;
@@ -508,7 +526,60 @@ impl Supervisor {
         launcher
             .start()
             .map_err(DiscordLaunchRequestError::Launch)?;
-        Ok(request.request_id)
+        let reference = self.record_discord_dispatch(request);
+        Ok((request.request_id, reference))
+    }
+
+    fn record_discord_dispatch(&mut self, request: RequestContext) -> u128 {
+        let now = Instant::now();
+        let execution = ExecutionId::next();
+        // This is a correlation reference, not an authorization token. The
+        // execution counter prevents reuse within one owner, and the timestamp
+        // makes accidental reuse after a monitor restart unlikely.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let reference = (u128::from(execution.value()) << 64)
+            | (nanos as u64 ^ u64::from(std::process::id())) as u128;
+        let anchor = ExecutionAnchor::new(request, execution);
+        let mut case = VerificationCase::new(anchor, now, Duration::from_secs(5 * 60))
+            .expect("fixed nonzero verification window");
+        case.record_dispatch(anchor, DispatchState::Accepted, now, request.generation)
+            .expect("fresh execution dispatch");
+        self.last_discord_execution = Some(DiscordExecution { reference, case });
+        reference
+    }
+
+    /// Attaches one explicit report to the exact latest Discord dispatch.
+    /// A report is not trusted machine evidence and cannot verify success.
+    pub fn record_discord_feedback(
+        &mut self,
+        reference: u128,
+        kind: FeedbackKind,
+    ) -> Result<RecordResult, DiscordFeedbackError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.controller
+            .authorize_action(request)
+            .map_err(DiscordFeedbackError::Gate)?;
+        let execution = self
+            .last_discord_execution
+            .as_mut()
+            .filter(|execution| execution.reference == reference)
+            .ok_or(DiscordFeedbackError::UnknownExecution)?;
+        let anchor = execution.case.anchor();
+        execution
+            .case
+            .record_feedback(
+                UserFeedback {
+                    id: 1,
+                    anchor,
+                    kind,
+                },
+                Instant::now(),
+                self.controller.generation(),
+            )
+            .map_err(DiscordFeedbackError::Verification)
     }
 
     /// Read-only current-process observation in God Mode. Presence is not
@@ -587,6 +658,11 @@ impl Supervisor {
     ) -> Result<CompetitiveEntryResult, CompetitiveEntryError> {
         self.healthy_clear_since = None;
         let start = self.controller.enter_competitive(cause);
+        if let Some(execution) = self.last_discord_execution.as_mut() {
+            execution
+                .case
+                .cancel_for_generation_change(self.controller.generation());
+        }
         if start.was_already_restricted {
             return match self.worker_manager.active_process_count() {
                 Ok(0) if self.controller.transition() == TransitionState::Stable => {
@@ -955,6 +1031,78 @@ mod tests {
                 ValidationError::ProfileGate(GateError::StaleGeneration)
             ))
         ));
+    }
+
+    #[test]
+    fn discord_feedback_is_exact_deduplicated_and_not_machine_verification() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let request = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        let reference = supervisor.record_discord_dispatch(request);
+        assert_eq!(
+            supervisor.record_discord_feedback(reference ^ 1, FeedbackKind::Worked),
+            Err(DiscordFeedbackError::UnknownExecution)
+        );
+        assert_eq!(
+            supervisor.record_discord_feedback(reference, FeedbackKind::Worked),
+            Ok(RecordResult::Recorded)
+        );
+        assert_eq!(
+            supervisor.record_discord_feedback(reference, FeedbackKind::Worked),
+            Ok(RecordResult::AlreadyRecorded)
+        );
+        assert_eq!(
+            supervisor.record_discord_feedback(reference, FeedbackKind::Failed),
+            Err(DiscordFeedbackError::Verification(
+                VerificationError::ConflictingDuplicate
+            ))
+        );
+        assert_eq!(
+            supervisor
+                .last_discord_execution
+                .as_ref()
+                .unwrap()
+                .case
+                .machine_outcome(),
+            jarvis_verification::MachineOutcome::Pending
+        );
+        let next_request =
+            RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        let next_reference = supervisor.record_discord_dispatch(next_request);
+        assert_ne!(reference, next_reference);
+        assert_eq!(
+            supervisor.record_discord_feedback(reference, FeedbackKind::Worked),
+            Err(DiscordFeedbackError::UnknownExecution)
+        );
+    }
+
+    #[test]
+    fn discord_feedback_is_invalidated_by_competitive_entry() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let request = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        let reference = supervisor.record_discord_dispatch(request);
+        supervisor
+            .enter_competitive(TransitionCause::Cs2Process)
+            .unwrap();
+        assert_eq!(
+            supervisor.record_discord_feedback(reference, FeedbackKind::Worked),
+            Err(DiscordFeedbackError::Gate(GateError::ProfileRestricted))
+        );
+        assert_eq!(
+            supervisor
+                .last_discord_execution
+                .as_ref()
+                .unwrap()
+                .case
+                .machine_outcome(),
+            jarvis_verification::MachineOutcome::Canceled
+        );
+        supervisor.controller.restore_god_mode(false, true).unwrap();
+        assert_eq!(
+            supervisor.record_discord_feedback(reference, FeedbackKind::Worked),
+            Err(DiscordFeedbackError::Verification(
+                VerificationError::StaleGeneration
+            ))
+        );
     }
 
     #[test]

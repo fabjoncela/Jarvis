@@ -153,6 +153,7 @@ dependencies = [
  "jarvis-profiles",
  "jarvis-router",
  "jarvis-storage",
+ "jarvis-verification",
  "jarvis-windows",
 ]
 
