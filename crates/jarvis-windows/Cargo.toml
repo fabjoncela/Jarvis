@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 jarvis-core = { path = "../jarvis-core" }
+jarvis-profiles = { path = "../jarvis-profiles" }
 jarvis-windows-ffi = { path = "../jarvis-windows-ffi" }
 
 [lints]

@@ -2,8 +2,8 @@
 
 ## Implemented foundation
 
-The workspace currently provides a desktop-action-free validation slice, not a
-running desktop assistant:
+The workspace provides a validation foundation and one explicit, confirmed
+pre-match launch sequence, not a running desktop assistant:
 
 1. `jarvis-core` creates request IDs, profile generations, and cancellation
    tokens.
@@ -18,8 +18,8 @@ running desktop assistant:
    fields, unsafe storage paths, raw executable paths, policy weakening, alias
    collisions, and external cleanup targets. It does not certify FACEIT
    compatibility or a local FACEIT identity.
-5. `jarvis-actions` accepts only typed, configured plans and exposes an
-   executor interface with no production executor yet.
+5. `jarvis-actions` accepts only typed, configured plans. There is no general
+   action executor; the pre-match capability has its own fixed supervisor path.
 6. `jarvis-router` performs conservative normalization, config-derived exact
    aliases, and a bounded `set volume to <0..100>` pattern.
 7. `jarvis-windows-ffi` owns the only reviewed raw Win32 calls. It creates an
@@ -42,14 +42,16 @@ running desktop assistant:
 10. The supervisor can enter Competitive Mode through the real fixed-worker
     manager: it closes both gates first, verifies its owned Job Object is empty,
     and records a restricted fault if containment cannot be verified.
-11. The router and action validator model a single fixed, confirmation-required
-    pre-match handoff: verified FACEIT client, Chrome opening `faceit.com`
-    without authentication, then Steam app 730. It has no executor, so this is
-    a validated intent rather than an external action.
-12. `--pre-match-setup-self-check` performs a native, read-only local identity
-    check for the fixed FACEIT client and registered service, Chrome, Steam,
-    and app 730. It does not start any component and is not a compatibility
-    certification or reusable execution grant.
+11. The router and action validator model one fixed, confirmation-required
+    pre-match handoff: start the FACEIT Anti-Cheat Launcher, open `faceit.com`
+    in Chrome without credential handling, then request Steam app 730. The
+    explicit `--prepare-faceit-cs2` command prompts for `START` and runs only
+    this sequence, repeating identity verification and profile admission
+    before each step. It never starts the service directly.
+12. `--pre-match-setup-self-check` performs the native read-only identity
+    check for the fixed FACEIT Anti-Cheat Launcher and registered service,
+    Chrome, Steam, and app 730. It does not start any component and is not a
+    compatibility certification or reusable execution grant.
 
 ## Explicitly not implemented
 
@@ -57,13 +59,15 @@ running desktop assistant:
   the fixed session worker's cooperative exit event
 - a Windows service, process/service event subscriptions, or FACEIT process or
   service identity verification
-- actual application, audio, browser, file, service, or system actions
+- general desktop application, audio, browser, file, service, or system action
+  execution; only the fixed confirmation-gated pre-match sequence can launch
+  the FACEIT AC launcher, Chrome, and Steam app 730
 - SQLite, IPC, tray UI, microphone, STT, TTS, Qwen, or learning
 - any CS2/FACEIT interaction beyond abstract trigger names used in tests
 
 ## Next milestone
 
-Add the narrow pre-match executor with a fresh confirmation and re-verification
-immediately before each step. Then add ordinary process/service lifecycle
-subscriptions plus startup reconciliation. Keep detection fail-closed and do
-not add a general executable- or PID-based API.
+Add ordinary process/service lifecycle subscriptions plus startup
+reconciliation, and connect verified FACEIT setup to the fail-closed detector.
+Keep detection fail-closed and do not add a general executable- or PID-based
+API.

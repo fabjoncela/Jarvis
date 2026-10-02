@@ -36,17 +36,19 @@ and service identities are not configured or verified, so the detector is
 unhealthy by design and Competitive Mode remains fail-closed. There is no
 resident process/service subscription or startup reconciliation yet.
 
-The pre-match workflow is also deliberately singular: after a fresh user
-confirmation, a future executor may start the locally verified FACEIT client,
-open `https://www.faceit.com/` in locally verified Chrome without handling
-authentication, and launch CS2 only through Steam app 730. It is represented
-as one typed action so it cannot become three arbitrary launch APIs. There is
-currently no executor; a later implementation must re-check each local
-identity immediately before use and complete the pre-authorized handoff before
-Competitive Mode suppresses all general automation.
+The pre-match workflow is deliberately singular: the explicit
+`--prepare-faceit-cs2` command requires the user to type `START`, then launches
+the verified FACEIT Anti-Cheat Launcher, opens `https://www.faceit.com/` in
+verified Chrome without handling authentication, and requests CS2 through
+Steam app 730. It is represented as one typed action rather than three
+arbitrary launch APIs. The supervisor rechecks profile admission before each
+step, and each fixed launch repeats local identity verification. Jarvis does
+not start `FACEITService` directly; the official launcher manages its own
+dependencies. If a step fails, later steps stop and the partial completion is
+reported.
 
-The current native setup check is read-only: it accepts only FACEIT's fixed
-client/service locations under Program Files, verifies their Windows trust,
+The native setup check is read-only: it accepts only FACEIT's fixed
+Anti-Cheat Launcher/service locations under Program Files, verifies their Windows trust,
 checks that the registered `FACEITService` has exactly that service binary,
 verifies fixed Chrome and Steam installations, and confirms Steam's local
 app-730 manifest. It starts no application or service, carries no durable

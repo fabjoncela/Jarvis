@@ -12,9 +12,9 @@ use jarvis_windows::{
     ProcessObservationError, WorkerLifecycle, WorkerState,
 };
 
-/// Read-only setup check for the three fixed pre-match launch targets. A
-/// future executor must invoke this again immediately before every handoff;
-/// a previous successful check is never a durable grant.
+/// Read-only setup check for the three fixed pre-match launch targets. The
+/// handoff invokes it again immediately before every step; a previous
+/// successful check is never a durable grant.
 pub trait PreMatchSetupSource {
     fn verify_pre_match_setup(&mut self) -> Result<(), PreMatchSetupError>;
 }
@@ -51,6 +51,47 @@ pub fn pre_match_setup_status(
 /// process names or PIDs.
 pub trait Cs2ProcessSource {
     fn cs2_is_running(&mut self) -> Result<bool, ProcessObservationError>;
+}
+
+#[derive(Debug)]
+pub enum PreMatchReadinessError {
+    Cs2AlreadyRunning,
+    Cs2ObservationUnavailable(ProcessObservationError),
+}
+
+impl std::fmt::Display for PreMatchReadinessError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cs2AlreadyRunning => write!(formatter, "CS2 is already running"),
+            Self::Cs2ObservationUnavailable(error) => {
+                write!(
+                    formatter,
+                    "could not verify whether CS2 is running: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PreMatchReadinessError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cs2ObservationUnavailable(error) => Some(error),
+            Self::Cs2AlreadyRunning => None,
+        }
+    }
+}
+
+/// Denies a fresh pre-match launch if CS2 is already active or the fixed
+/// read-only process snapshot is unavailable.
+pub fn ensure_cs2_not_running(
+    source: &mut impl Cs2ProcessSource,
+) -> Result<(), PreMatchReadinessError> {
+    match source.cs2_is_running() {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(PreMatchReadinessError::Cs2AlreadyRunning),
+        Err(error) => Err(PreMatchReadinessError::Cs2ObservationUnavailable(error)),
+    }
 }
 
 /// The ordinary Windows implementation uses a Tool Help process snapshot with
@@ -290,6 +331,27 @@ mod tests {
         assert!(matches!(
             pre_match_setup_status(&mut source),
             Err(PreMatchSetupError::Cs2ManifestMissing)
+        ));
+    }
+
+    #[test]
+    fn pre_match_is_denied_when_cs2_is_already_running() {
+        let mut source = FixedCs2Source(Ok(true));
+        assert!(matches!(
+            ensure_cs2_not_running(&mut source),
+            Err(PreMatchReadinessError::Cs2AlreadyRunning)
+        ));
+    }
+
+    #[test]
+    fn pre_match_is_denied_when_cs2_observation_fails() {
+        let mut source =
+            FixedCs2Source(Err(ProcessObservationError::CandidateIdentityUnavailable {
+                process: FixedCompetitiveProcess::Cs2,
+            }));
+        assert!(matches!(
+            ensure_cs2_not_running(&mut source),
+            Err(PreMatchReadinessError::Cs2ObservationUnavailable(_))
         ));
     }
 

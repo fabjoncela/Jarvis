@@ -1,4 +1,4 @@
-//! Serialized, non-executing supervisor foundation.
+//! Serialized supervisor foundation with one fixed pre-match capability.
 //!
 //! `Supervisor` is the sole owner of profile state, configured routing, action
 //! validation, the fixed internal-worker manifest, and an empty owned Job
@@ -9,17 +9,19 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use jarvis_actions::{ActionRegistry, ValidatedPlan, ValidationError};
+use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, ValidationError};
 use jarvis_config::{ConfigError, FaceitSetupStatus, ValidatedConfiguration};
 use jarvis_core::{ProfileGeneration, RequestContext, RequestId};
+use jarvis_gaming::{ensure_cs2_not_running, WindowsCs2ProcessSource};
 use jarvis_profiles::{
     GateError, Profile, ProfileController, ShutdownVerification, TransitionCause, TransitionStart,
     TransitionState,
 };
 use jarvis_router::{RouteResult, Router};
 use jarvis_windows::{
-    InternalWorker, Win32Error, WindowsWorkerManager, WorkerManagerError, WorkerManifest,
-    WorkerProcessIdentity, WorkerShutdownReport,
+    run_pre_match_handoff, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport, Win32Error,
+    WindowsWorkerManager, WorkerManagerError, WorkerManifest, WorkerProcessIdentity,
+    WorkerShutdownReport,
 };
 
 #[derive(Debug)]
@@ -37,6 +39,44 @@ pub enum WorkerStartError {
 #[derive(Debug)]
 pub enum CompetitiveEntryError {
     WorkerManager(WorkerManagerError),
+}
+
+#[derive(Debug)]
+pub enum PreMatchHandoffRequestError {
+    Validation(ValidationError),
+    ConfirmationRequired,
+    Readiness(String),
+    Execution(PreMatchHandoffError),
+}
+
+impl fmt::Display for PreMatchHandoffRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(error) => write!(formatter, "pre-match action rejected: {error:?}"),
+            Self::ConfirmationRequired => {
+                write!(
+                    formatter,
+                    "the fixed pre-match sequence requires explicit confirmation"
+                )
+            }
+            Self::Readiness(error) => {
+                write!(
+                    formatter,
+                    "pre-match launch denied by readiness check: {error}"
+                )
+            }
+            Self::Execution(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for PreMatchHandoffRequestError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Execution(error) => Some(error),
+            Self::Validation(_) | Self::ConfirmationRequired | Self::Readiness(_) => None,
+        }
+    }
 }
 
 impl fmt::Display for CompetitiveEntryError {
@@ -133,8 +173,8 @@ pub enum RouteOutcome {
 ///
 /// All request admission takes `&mut self`, making the serialized ownership
 /// explicit even though the current CLI does not yet run a resident event loop
-/// or process monitor. Its only worker start is the explicit fixed-worker
-/// containment self-check.
+/// or process monitor. Its only external application capability is the
+/// explicit fixed pre-match handoff.
 pub struct Supervisor {
     configuration: ValidatedConfiguration,
     controller: ProfileController,
@@ -199,6 +239,34 @@ impl Supervisor {
             RouteResult::InvalidPattern { reason } => Ok(RouteOutcome::InvalidPattern(reason)),
             RouteResult::Unknown => Ok(RouteOutcome::Unknown),
         }
+    }
+
+    /// Executes the one fixed pre-match handoff only after the caller collected
+    /// fresh user confirmation. The supervisor validates its registered action
+    /// once, then the same request generation is admitted again before each
+    /// externally visible process start.
+    pub fn prepare_faceit_cs2(
+        &mut self,
+        user_confirmed: bool,
+    ) -> Result<PreMatchHandoffReport, PreMatchHandoffRequestError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        let validated = self
+            .registry
+            .validate(
+                ActionPlan::single(Action::StartCompetitiveHandoff),
+                request,
+                &self.controller,
+            )
+            .map_err(PreMatchHandoffRequestError::Validation)?;
+        if !validated.requires_confirmation() || !user_confirmed {
+            return Err(PreMatchHandoffRequestError::ConfirmationRequired);
+        }
+
+        ensure_cs2_not_running(&mut WindowsCs2ProcessSource)
+            .map_err(|error| PreMatchHandoffRequestError::Readiness(error.to_string()))?;
+
+        run_pre_match_handoff(|| self.controller.authorize_action(request))
+            .map_err(PreMatchHandoffRequestError::Execution)
     }
 
     /// Starts one fixed internal worker only after the current profile gate
@@ -317,6 +385,32 @@ mod tests {
         assert!(matches!(
             supervisor.route("Jarvis, open Discord"),
             Ok(RouteOutcome::Validated(_))
+        ));
+    }
+
+    #[test]
+    fn pre_match_handoff_requires_explicit_confirmation_before_execution() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        assert!(matches!(
+            supervisor.prepare_faceit_cs2(false),
+            Err(PreMatchHandoffRequestError::ConfirmationRequired)
+        ));
+    }
+
+    #[test]
+    fn pre_match_handoff_is_denied_after_competitive_mode_closes_the_gate() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+        supervisor
+            .controller
+            .enter_competitive(TransitionCause::Manual);
+
+        assert!(matches!(
+            supervisor.prepare_faceit_cs2(true),
+            Err(PreMatchHandoffRequestError::Validation(
+                ValidationError::ProfileGate(GateError::ProfileRestricted)
+            ))
         ));
     }
 

@@ -92,6 +92,7 @@ name = "jarvis-windows"
 version = "0.1.0"
 dependencies = [
  "jarvis-core",
+ "jarvis-profiles",
  "jarvis-windows-ffi",
 ]
 

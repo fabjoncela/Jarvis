@@ -22,10 +22,10 @@ pub enum Risk {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
-    /// A future executor may perform only this fixed, user-confirmed sequence:
-    /// start the verified FACEIT client, open `https://www.faceit.com/` in the
-    /// verified Chrome installation without authentication, then launch CS2
-    /// through Steam app 730. It is not three general launch capabilities.
+    /// The fixed, user-confirmed sequence: start the verified FACEIT
+    /// Anti-Cheat Launcher, open `https://www.faceit.com/` in verified Chrome
+    /// without authentication, then launch CS2 through Steam app 730. This is
+    /// not three general launch capabilities.
     StartCompetitiveHandoff,
     LaunchApplication {
         application_id: String,

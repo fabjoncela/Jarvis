@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-//! Desktop-action-free CLI for the Jarvis supervisor foundation.
+//! CLI for the Jarvis supervisor foundation and fixed pre-match handoff.
 //!
 //! `--serve-stdin` keeps one serialized supervisor alive for explicitly typed
-//! status and route requests. It intentionally starts no process monitor or
-//! action executor; `--worker-self-check` is the sole fixed-worker start.
+//! status and route requests. It starts no process monitor or general action
+//! executor; the pre-match command is the sole user-application launch path.
 
 mod supervisor;
 
@@ -45,8 +45,9 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--competitive-self-check" => competitive_self_check(&mut supervisor),
         [flag] if flag == "--detection-self-check" => detection_self_check(&mut supervisor),
         [flag] if flag == "--pre-match-setup-self-check" => pre_match_setup_self_check(),
+        [flag] if flag == "--prepare-faceit-cs2" => prepare_faceit_cs2(&mut supervisor),
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --pre-match-setup-self-check]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --pre-match-setup-self-check | --prepare-faceit-cs2]"
                 .to_owned(),
         ),
     }
@@ -311,12 +312,46 @@ fn pre_match_setup_self_check() -> Result<(), String> {
         return Err("pre-match setup was not verified for this check".to_owned());
     }
     println!("Jarvis pre-match setup self-check");
-    println!("fixed FACEIT client and registered service: verified");
+    println!("fixed FACEIT Anti-Cheat Launcher and registered service: verified");
     println!("fixed Chrome and Steam installations: verified");
     println!("Steam CS2 app 730 manifest: verified");
     println!(
         "execution: no FACEIT service, application, browser, Steam game, or login was started"
     );
+    Ok(())
+}
+
+/// Starts the fixed FACEIT AC → Chrome → Steam sequence only after an exact
+/// interactive confirmation. Authentication is left entirely to the user.
+fn prepare_faceit_cs2(supervisor: &mut Supervisor) -> Result<(), String> {
+    println!("This will start the FACEIT Anti-Cheat Launcher, open https://www.faceit.com/ in Chrome, and request CS2 (Steam app 730).");
+    println!("Jarvis will not type credentials or start the FACEIT service directly.");
+    print!("Type START to continue, or press Enter to cancel: ");
+    io::stdout().flush().map_err(io_error)?;
+
+    let mut response = String::new();
+    io::stdin().read_line(&mut response).map_err(io_error)?;
+    if response.trim() != "START" {
+        println!("Pre-match sequence cancelled; nothing was launched.");
+        return Ok(());
+    }
+
+    let report = supervisor
+        .prepare_faceit_cs2(true)
+        .map_err(|error| format!("pre-match handoff failed: {error}"))?;
+    println!(
+        "FACEIT Anti-Cheat Launcher started: {}",
+        report.faceit_ac_launcher_started
+    );
+    println!(
+        "Chrome faceit.com URL request accepted: {}",
+        report.chrome_faceit_url_requested
+    );
+    println!(
+        "Steam CS2 launch request accepted: {}",
+        report.steam_cs2_launch_requested
+    );
+    println!("Jarvis did not sign in or interact with CS2.");
     Ok(())
 }
 

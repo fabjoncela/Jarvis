@@ -5,7 +5,9 @@
 //! The in-memory lifecycle adapter supports deterministic policy tests. The
 //! `WindowsWorkerManager` owns an opaque Job Object and can start only a
 //! fixed-manifest internal worker through the suspended-create, assign, verify,
-//! resume sequence. It cannot adopt a PID or launch an arbitrary executable.
+//! resume sequence. The only user-application launch path is the fixed
+//! confirmed pre-match handoff; it cannot adopt a PID or launch arbitrary
+//! executables.
 
 use std::error::Error;
 use std::fmt;
@@ -14,14 +16,118 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use jarvis_core::ProfileGeneration;
+use jarvis_profiles::GateError;
+use jarvis_windows_ffi::{
+    launch_verified_pre_match_step, FixedInternalWorker, InternalWorkerIdentity, KillOnCloseJob,
+    RunningInternalWorker,
+};
 pub use jarvis_windows_ffi::{
     observe_cs2_processes, verify_default_pre_match_setup, FixedCompetitiveProcess,
-    ObservedProcessIdentity, PreMatchSetupError, ProcessObservationError, VerifiedPreMatchSetup,
-    Win32Error, WorkerLaunchError,
+    ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError,
+    ProcessObservationError, VerifiedPreMatchSetup, Win32Error, WorkerLaunchError,
 };
-use jarvis_windows_ffi::{
-    FixedInternalWorker, InternalWorkerIdentity, KillOnCloseJob, RunningInternalWorker,
-};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreMatchHandoffReport {
+    pub faceit_ac_launcher_started: bool,
+    pub chrome_faceit_url_requested: bool,
+    pub steam_cs2_launch_requested: bool,
+}
+
+impl PreMatchHandoffReport {
+    const fn empty() -> Self {
+        Self {
+            faceit_ac_launcher_started: false,
+            chrome_faceit_url_requested: false,
+            steam_cs2_launch_requested: false,
+        }
+    }
+
+    fn record(&mut self, step: PreMatchLaunchStep) {
+        match step {
+            PreMatchLaunchStep::FaceitAcLauncher => self.faceit_ac_launcher_started = true,
+            PreMatchLaunchStep::ChromeFaceitWebsite => self.chrome_faceit_url_requested = true,
+            PreMatchLaunchStep::SteamCs2 => self.steam_cs2_launch_requested = true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PreMatchHandoffError {
+    Authorization {
+        step: PreMatchLaunchStep,
+        completed: PreMatchHandoffReport,
+        source: GateError,
+    },
+    Launch {
+        step: PreMatchLaunchStep,
+        completed: PreMatchHandoffReport,
+        source: String,
+    },
+}
+
+impl fmt::Display for PreMatchHandoffError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorization {
+                step,
+                completed,
+                source,
+            } => write!(
+                formatter,
+                "pre-match handoff denied before {step:?}; completed steps: {completed:?}; {source:?}"
+            ),
+            Self::Launch {
+                step,
+                completed,
+                source,
+            } => write!(
+                formatter,
+                "pre-match handoff stopped at {step:?}; completed steps: {completed:?}; {source}"
+            ),
+        }
+    }
+}
+
+impl Error for PreMatchHandoffError {}
+
+/// Runs only the fixed Anti-Cheat → Chrome website → Steam app 730 sequence.
+/// The supervisor reauthorizes the same request generation before every
+/// external process start; each FFI launch repeats the local identity check.
+pub fn run_pre_match_handoff(
+    authorize_step: impl FnMut() -> Result<(), GateError>,
+) -> Result<PreMatchHandoffReport, PreMatchHandoffError> {
+    run_pre_match_sequence(authorize_step, |step| {
+        launch_verified_pre_match_step(step).map_err(|error| error.to_string())
+    })
+}
+
+fn run_pre_match_sequence(
+    mut authorize_step: impl FnMut() -> Result<(), GateError>,
+    mut launch_step: impl FnMut(PreMatchLaunchStep) -> Result<(), String>,
+) -> Result<PreMatchHandoffReport, PreMatchHandoffError> {
+    let mut report = PreMatchHandoffReport::empty();
+    for step in [
+        PreMatchLaunchStep::FaceitAcLauncher,
+        PreMatchLaunchStep::ChromeFaceitWebsite,
+        PreMatchLaunchStep::SteamCs2,
+    ] {
+        authorize_step().map_err(|source| PreMatchHandoffError::Authorization {
+            step,
+            completed: report,
+            source,
+        })?;
+        if let Err(source) = launch_step(step) {
+            return Err(PreMatchHandoffError::Launch {
+                step,
+                completed: report,
+                source,
+            });
+        }
+        report.record(step);
+    }
+    Ok(report)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerId(String);
@@ -541,5 +647,105 @@ mod tests {
             }
         );
         assert_eq!(manager.active_process_count().expect("query empty job"), 0);
+    }
+
+    #[test]
+    fn pre_match_sequence_admits_and_starts_only_the_fixed_order() {
+        let mut authorization_checks = 0;
+        let mut started = Vec::new();
+        let report = run_pre_match_sequence(
+            || {
+                authorization_checks += 1;
+                Ok(())
+            },
+            |step| {
+                started.push(step);
+                Ok(())
+            },
+        )
+        .expect("all fixed steps should pass the mock admission and launcher");
+
+        assert_eq!(
+            started,
+            vec![
+                PreMatchLaunchStep::FaceitAcLauncher,
+                PreMatchLaunchStep::ChromeFaceitWebsite,
+                PreMatchLaunchStep::SteamCs2,
+            ]
+        );
+        assert_eq!(authorization_checks, 3);
+        assert!(report.faceit_ac_launcher_started);
+        assert!(report.chrome_faceit_url_requested);
+        assert!(report.steam_cs2_launch_requested);
+    }
+
+    #[test]
+    fn pre_match_sequence_stops_after_a_failed_step_and_reports_partial_progress() {
+        let mut started = Vec::new();
+        let result = run_pre_match_sequence(
+            || Ok(()),
+            |step| {
+                started.push(step);
+                if step == PreMatchLaunchStep::ChromeFaceitWebsite {
+                    Err("mock Chrome start failure".to_owned())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(PreMatchHandoffError::Launch {
+                step: PreMatchLaunchStep::ChromeFaceitWebsite,
+                completed: PreMatchHandoffReport {
+                    faceit_ac_launcher_started: true,
+                    chrome_faceit_url_requested: false,
+                    steam_cs2_launch_requested: false,
+                },
+                source: "mock Chrome start failure".to_owned(),
+            })
+        );
+        assert_eq!(
+            started,
+            vec![
+                PreMatchLaunchStep::FaceitAcLauncher,
+                PreMatchLaunchStep::ChromeFaceitWebsite,
+            ]
+        );
+    }
+
+    #[test]
+    fn pre_match_sequence_rechecks_authorization_before_each_step() {
+        let mut authorization_checks = 0;
+        let mut started = Vec::new();
+        let result = run_pre_match_sequence(
+            || {
+                authorization_checks += 1;
+                if authorization_checks == 2 {
+                    Err(GateError::StaleGeneration)
+                } else {
+                    Ok(())
+                }
+            },
+            |step| {
+                started.push(step);
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(PreMatchHandoffError::Authorization {
+                step: PreMatchLaunchStep::ChromeFaceitWebsite,
+                completed: PreMatchHandoffReport {
+                    faceit_ac_launcher_started: true,
+                    chrome_faceit_url_requested: false,
+                    steam_cs2_launch_requested: false,
+                },
+                source: GateError::StaleGeneration,
+            })
+        );
+        assert_eq!(started, vec![PreMatchLaunchStep::FaceitAcLauncher]);
     }
 }

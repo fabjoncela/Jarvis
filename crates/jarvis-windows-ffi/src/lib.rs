@@ -153,9 +153,60 @@ impl Error for ProcessObservationError {
 
 /// The outcome of one read-only local pre-match setup verification. This
 /// carries no paths, credentials, or authority to launch an application.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedPreMatchSetup {
-    _private: (),
+    faceit_ac_launcher: PathBuf,
+    chrome: PathBuf,
+    steam: PathBuf,
+}
+
+/// The only external applications this FACEIT setup flow can start. All
+/// targets and arguments are fixed in code and none can be supplied by a user
+/// or an LLM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreMatchLaunchStep {
+    FaceitAcLauncher,
+    ChromeFaceitWebsite,
+    SteamCs2,
+}
+
+impl PreMatchLaunchStep {
+    const fn command_line(self) -> &'static str {
+        match self {
+            Self::FaceitAcLauncher => "faceitclient.exe",
+            Self::ChromeFaceitWebsite => "chrome.exe https://www.faceit.com/",
+            Self::SteamCs2 => "steam.exe -applaunch 730",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PreMatchLaunchError {
+    Setup(PreMatchSetupError),
+    ProcessStart {
+        step: PreMatchLaunchStep,
+        source: Win32Error,
+    },
+}
+
+impl fmt::Display for PreMatchLaunchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Setup(error) => error.fmt(formatter),
+            Self::ProcessStart { step, source } => {
+                write!(formatter, "could not start {step:?}: {source}")
+            }
+        }
+    }
+}
+
+impl Error for PreMatchLaunchError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Setup(error) => Some(error),
+            Self::ProcessStart { source, .. } => Some(source),
+        }
+    }
 }
 
 /// A failure to establish the fixed local identities required for the narrow
@@ -250,8 +301,8 @@ impl Error for PreMatchSetupError {
     }
 }
 
-/// Verifies the only local installations a future pre-match executor may use:
-/// FACEIT's client and registered service, Google Chrome, Steam, and Steam app
+/// Verifies the only local installations the pre-match launcher may use:
+/// FACEIT's Anti-Cheat Launcher and registered service, Google Chrome, Steam, and Steam app
 /// 730. This function is read-only. It never starts a service/process, opens a
 /// browser, reads credentials, or accepts a caller-provided target.
 pub fn verify_default_pre_match_setup() -> Result<VerifiedPreMatchSetup, PreMatchSetupError> {
@@ -259,7 +310,11 @@ pub fn verify_default_pre_match_setup() -> Result<VerifiedPreMatchSetup, PreMatc
     let program_files_x86 = program_files_directory("ProgramFiles(x86)")?;
 
     let faceit_root = program_files.join("FACEIT AC");
-    let faceit_client = fixed_regular_file(&faceit_root, "faceitclient.exe", "FACEIT client")?;
+    let faceit_ac_launcher = fixed_regular_file(
+        &faceit_root,
+        "faceitclient.exe",
+        "FACEIT Anti-Cheat Launcher",
+    )?;
     let faceit_service = fixed_regular_file(&faceit_root, "faceitservice.exe", "FACEIT service")?;
     let chrome = fixed_regular_file(
         &program_files
@@ -272,7 +327,7 @@ pub fn verify_default_pre_match_setup() -> Result<VerifiedPreMatchSetup, PreMatc
     let steam_root = program_files_x86.join("Steam");
     let steam = fixed_regular_file(&steam_root, "steam.exe", "Steam")?;
 
-    verify_trusted_signature(&faceit_client, "FACEIT client")?;
+    verify_trusted_signature(&faceit_ac_launcher, "FACEIT Anti-Cheat Launcher")?;
     verify_trusted_signature(&faceit_service, "FACEIT service")?;
     verify_trusted_signature(&chrome, "Chrome")?;
     verify_trusted_signature(&steam, "Steam")?;
@@ -284,7 +339,75 @@ pub fn verify_default_pre_match_setup() -> Result<VerifiedPreMatchSetup, PreMatc
     }
 
     verify_cs2_manifest(&steam_root)?;
-    Ok(VerifiedPreMatchSetup { _private: () })
+    Ok(VerifiedPreMatchSetup {
+        faceit_ac_launcher,
+        chrome,
+        steam,
+    })
+}
+
+/// Launches one of the three fixed pre-match targets after repeating the
+/// complete local setup verification. This does not start `FACEITService`
+/// directly, handle authentication, or accept any dynamic command line.
+pub fn launch_verified_pre_match_step(step: PreMatchLaunchStep) -> Result<(), PreMatchLaunchError> {
+    let setup = verify_default_pre_match_setup().map_err(PreMatchLaunchError::Setup)?;
+    let executable = match step {
+        PreMatchLaunchStep::FaceitAcLauncher => &setup.faceit_ac_launcher,
+        PreMatchLaunchStep::ChromeFaceitWebsite => &setup.chrome,
+        PreMatchLaunchStep::SteamCs2 => &setup.steam,
+    };
+    start_fixed_pre_match_process(executable, step)
+}
+
+fn start_fixed_pre_match_process(
+    executable: &Path,
+    step: PreMatchLaunchStep,
+) -> Result<(), PreMatchLaunchError> {
+    let application_name = wide_null(executable);
+    let mut command_line: Vec<u16> = step
+        .command_line()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process_information = PROCESS_INFORMATION::default();
+
+    // SAFETY: `application_name` resolves to one signature-verified fixed
+    // installation executable; `command_line` is a constant argument string
+    // for the selected enum variant. No handles are inherited, no elevation
+    // verb is used, and all output structures are writable for this call.
+    let created = unsafe {
+        CreateProcessW(
+            application_name.as_ptr(),
+            command_line.as_mut_ptr(),
+            null(),
+            null(),
+            0,
+            0,
+            null(),
+            null(),
+            &startup,
+            &mut process_information,
+        )
+    };
+    if created == 0 {
+        return Err(PreMatchLaunchError::ProcessStart {
+            step,
+            source: last_error("CreateProcessW"),
+        });
+    }
+
+    // SAFETY: Both handles are owned by this successful CreateProcessW call.
+    // Closing them relinquishes Jarvis's references without terminating the
+    // newly started user applications.
+    unsafe {
+        let _ = CloseHandle(process_information.hThread);
+        let _ = CloseHandle(process_information.hProcess);
+    }
+    Ok(())
 }
 
 fn program_files_directory(variable: &'static str) -> Result<PathBuf, PreMatchSetupError> {
@@ -1233,5 +1356,21 @@ mod tests {
         assert!(!is_cs2_app_manifest(
             "\"AppState\"\n{\n\"appid\"\t\t\"570\"\n}"
         ));
+    }
+
+    #[test]
+    fn pre_match_launch_steps_have_only_the_fixed_apps_and_arguments() {
+        assert_eq!(
+            PreMatchLaunchStep::FaceitAcLauncher.command_line(),
+            "faceitclient.exe"
+        );
+        assert_eq!(
+            PreMatchLaunchStep::ChromeFaceitWebsite.command_line(),
+            "chrome.exe https://www.faceit.com/"
+        );
+        assert_eq!(
+            PreMatchLaunchStep::SteamCs2.command_line(),
+            "steam.exe -applaunch 730"
+        );
     }
 }

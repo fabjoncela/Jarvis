@@ -1,7 +1,8 @@
 # Jarvis
 
 Jarvis is an offline-first Windows desktop assistant written primarily in Rust.
-Its current V1 foundation has no desktop-action execution:
+Its current V1 foundation has no general desktop-action executor. It includes
+one user-confirmed fixed pre-match handoff for FACEIT AC, Chrome, and CS2:
 
 - a profile/generation safety model, exercised through unit tests;
 - a serialized supervisor foundation that owns policy, routing, validation, and
@@ -17,13 +18,12 @@ Its current V1 foundation has no desktop-action execution:
   Job Object membership, then resumes it; it also verifies a bounded
   cooperative exit and a safe restart after the Job Object is empty.
 
-No microphone capture, model loading, game interaction, or desktop automation
-is active in this scaffold. There is no resident event loop, CS2/FACEIT
-monitor, general multi-worker lifecycle, or desktop action executor.
+No microphone capture, model loading, or game interaction is active in this
+scaffold. There is no resident event loop, CS2/FACEIT monitor, general
+multi-worker lifecycle, or arbitrary desktop action executor.
 The supervisor created for a CLI command owns its Job Object and is dropped when
-that command exits. The sole real process start is the fixed-worker containment
-self-check; it cannot launch a configured desktop application or arbitrary
-executable.
+that command exits. The only user-app launch path is the explicit, confirmed
+fixed pre-match command documented below; it cannot launch arbitrary targets.
 
 ## Project status
 
@@ -51,6 +51,7 @@ cargo run -p jarvis -- --worker-self-check
 cargo run -p jarvis -- --competitive-self-check
 cargo run -p jarvis -- --detection-self-check
 cargo run -p jarvis -- --pre-match-setup-self-check
+cargo run -p jarvis -- --prepare-faceit-cs2
 cargo run -p jarvis -- --route "Jarvis, open Discord"
 cargo run -p jarvis -- --serve-stdin
 ```
@@ -58,9 +59,8 @@ cargo run -p jarvis -- --serve-stdin
 `--self-check` validates the fixed configuration bundle and initializes a
 serialized supervisor for that validation command. It owns an empty unnamed
 Jarvis Job Object and a one-entry internal worker manifest, but does not start
-a resident event loop, monitor a game or FACEIT, or start a worker. FACEIT
-identity verification is not yet implemented; this is not a compatibility
-certification.
+a resident event loop, monitor a game or FACEIT, or start a worker. The
+standalone local setup check is separate and does not certify compatibility.
 
 `--serve-stdin` keeps the same supervisor alive until `quit` or end-of-input.
 It accepts only `status` and `route <command>` requests, each of which remains
@@ -84,19 +84,21 @@ FACEIT setup is not yet verified, so that command must fail closed into
 Competitive Mode. Neither command starts a resident monitor or changes an
 external process or service.
 
-`Jarvis, prepare FACEIT CS2` now validates one fixed, confirmation-required
-**pre-match handoff**. A future executor may only: start the locally verified
-FACEIT client, open `https://www.faceit.com/` in the locally verified Chrome
-installation without signing in, and launch Steam app 730 (CS2). It is not an
-arbitrary app/browser/Steam command. The current build remains
-validation-only: it does not launch any of those components or log in.
+`Jarvis, prepare FACEIT CS2` validates one fixed, confirmation-required
+**pre-match handoff**. To execute it from the current CLI, run
+`--prepare-faceit-cs2` and type `START` at its prompt. Jarvis starts the
+verified FACEIT Anti-Cheat Launcher (`faceitclient.exe`), opens
+`https://www.faceit.com/` in verified Chrome, then asks Steam to launch app 730
+(CS2). It does not start `FACEITService` directly or type credentials. If a
+step fails, later steps are skipped and the error reports which earlier steps
+were started. The successful CLI exits after sending the three launch requests.
 
 `--pre-match-setup-self-check` verifies that exact local handoff setup without
 starting anything: fixed Program Files locations, valid Windows Authenticode
-trust for FACEIT/Chrome/Steam binaries, the registered `FACEITService` binary,
-and Steam's local CS2 app-730 manifest. A successful check is not FACEIT
-approval or a reusable permission; a future executor must repeat it just
-before each step.
+trust for the FACEIT Anti-Cheat Launcher/Service, Chrome, and Steam binaries,
+the registered `FACEITService` binary, and Steam's local CS2 app-730 manifest.
+The handoff repeats this verification before every launch step. A successful
+check is not FACEIT approval or a reusable permission.
 
 Runtime data will eventually live under `%LOCALAPPDATA%\Jarvis`, never in the
 repository. Model files, recordings, credentials, and live databases must not
