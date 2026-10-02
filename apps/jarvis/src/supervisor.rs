@@ -1,4 +1,4 @@
-//! Serialized supervisor foundation with one fixed pre-match capability.
+//! Serialized supervisor foundation with fixed pre-match and Discord capabilities.
 //!
 //! `Supervisor` is the sole owner of profile state, configured routing, action
 //! validation, the fixed internal-worker manifest, and an owned Job Object.
@@ -23,9 +23,9 @@ use jarvis_storage::{
     Store, StoredPreference, StoredPreferenceTombstone,
 };
 use jarvis_windows::{
-    run_pre_match_handoff, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport, Win32Error,
-    WindowsWorkerManager, WorkerManagerError, WorkerManifest, WorkerProcessIdentity,
-    WorkerShutdownReport,
+    run_pre_match_handoff, verify_fixed_discord_launcher, InternalWorker, PreMatchHandoffError,
+    PreMatchHandoffReport, PreMatchSetupError, Win32Error, WindowsWorkerManager,
+    WorkerManagerError, WorkerManifest, WorkerProcessIdentity, WorkerShutdownReport,
 };
 
 #[derive(Debug)]
@@ -80,6 +80,31 @@ pub enum PreMatchHandoffRequestError {
     Readiness(String),
     Execution(PreMatchHandoffError),
 }
+
+#[derive(Debug)]
+pub enum DiscordLaunchRequestError {
+    Validation(ValidationError),
+    Authorization(GateError),
+    UnexpectedConfirmation,
+    Setup(PreMatchSetupError),
+    Launch(Win32Error),
+}
+
+impl fmt::Display for DiscordLaunchRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(error) => write!(formatter, "Discord action rejected: {error:?}"),
+            Self::Authorization(error) => write!(formatter, "Discord action denied: {error:?}"),
+            Self::UnexpectedConfirmation => {
+                formatter.write_str("Discord action was unexpectedly marked confirmation-required")
+            }
+            Self::Setup(error) => error.fmt(formatter),
+            Self::Launch(error) => write!(formatter, "could not start Discord: {error}"),
+        }
+    }
+}
+
+impl Error for DiscordLaunchRequestError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HandoffAttemptState {
@@ -231,8 +256,8 @@ pub enum RouteOutcome {
 /// The one authoritative mutable owner for a future long-lived Jarvis process.
 ///
 /// All request admission takes `&mut self`, keeping policy and monitor
-/// reconciliation serialized. Its only external application capability is the
-/// explicit fixed pre-match handoff.
+/// reconciliation serialized. External application capabilities are limited
+/// to the explicit fixed pre-match handoff and fixed Discord launcher.
 pub struct Supervisor {
     configuration: ValidatedConfiguration,
     controller: ProfileController,
@@ -450,6 +475,45 @@ impl Supervisor {
             report,
         });
         result
+    }
+
+    /// Executes only the configured Discord launch action. The registry and
+    /// profile gate are checked before FFI, and the same generation is checked
+    /// again immediately before the fixed native launch path.
+    pub fn open_discord(&mut self) -> Result<RequestId, DiscordLaunchRequestError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.authorize_discord_request(request)?;
+        let launcher = verify_fixed_discord_launcher().map_err(DiscordLaunchRequestError::Setup)?;
+        self.controller
+            .authorize_action(request)
+            .map_err(DiscordLaunchRequestError::Authorization)?;
+        launcher
+            .start()
+            .map_err(DiscordLaunchRequestError::Launch)?;
+        Ok(request.request_id)
+    }
+
+    fn authorize_discord_request(
+        &self,
+        request: RequestContext,
+    ) -> Result<(), DiscordLaunchRequestError> {
+        let validated = self
+            .registry
+            .validate(
+                ActionPlan::single(Action::LaunchApplication {
+                    application_id: "discord".to_owned(),
+                }),
+                request,
+                &self.controller,
+            )
+            .map_err(DiscordLaunchRequestError::Validation)?;
+        if validated.requires_confirmation() {
+            return Err(DiscordLaunchRequestError::UnexpectedConfirmation);
+        }
+        self.controller
+            .authorize_action(request)
+            .map_err(DiscordLaunchRequestError::Authorization)?;
+        Ok(())
     }
 
     /// Starts one fixed internal worker only after the current profile gate
@@ -822,6 +886,40 @@ mod tests {
         let attempt = supervisor.last_handoff_attempt().expect("denial recorded");
         assert_eq!(attempt.state, HandoffAttemptState::Rejected);
         assert_eq!(attempt.report, PreMatchHandoffReport::empty());
+    }
+
+    #[test]
+    fn discord_launch_is_denied_in_competitive_mode_before_native_setup() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        supervisor
+            .controller
+            .enter_competitive(TransitionCause::Manual);
+        assert!(matches!(
+            supervisor.open_discord(),
+            Err(DiscordLaunchRequestError::Validation(
+                ValidationError::ProfileGate(GateError::ProfileRestricted)
+            ))
+        ));
+    }
+
+    #[test]
+    fn discord_launch_request_cannot_replay_after_profile_generation_change() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let old = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        assert!(supervisor.authorize_discord_request(old).is_ok());
+        supervisor
+            .controller
+            .enter_competitive(TransitionCause::Cs2Process);
+        supervisor
+            .controller
+            .finish_competitive_shutdown(ShutdownVerification::Clean);
+        supervisor.controller.restore_god_mode(false, true).unwrap();
+        assert!(matches!(
+            supervisor.authorize_discord_request(old),
+            Err(DiscordLaunchRequestError::Validation(
+                ValidationError::ProfileGate(GateError::StaleGeneration)
+            ))
+        ));
     }
 
     #[test]

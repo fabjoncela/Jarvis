@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 
-//! CLI for the Jarvis supervisor foundation and fixed pre-match handoff.
+//! CLI for the Jarvis supervisor foundation and fixed desktop launch paths.
 //!
 //! `--serve-stdin` keeps one serialized supervisor alive for explicitly typed
 //! status and route requests. `--monitor-competitive` is the opt-in fixed-scope
-//! process/service poller; the pre-match command is the sole user-app launcher.
+//! process/service poller; the pre-match and Discord commands are the only
+//! user-app launchers.
 
 mod supervisor;
 
@@ -50,6 +51,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--worker-self-check" => return worker_self_check_client(),
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
         [flag] if flag == "--last-handoff" => return last_handoff(),
+        [flag] if flag == "--open-discord" => return open_discord(),
         [flag] if flag == "--show-preferred-app" => return show_preferred_app(),
         [flag] if flag == "--clear-preferred-app" => return clear_preferred_app(),
         [flag, app] if flag == "--remember-preferred-app" => {
@@ -81,7 +83,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -142,7 +144,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "execution: desktop actions remain disabled; no configured application launch was performed"
+        "execution: only the resident owner can run fixed pre-match or Discord launch commands; this self-check performed no application launch"
     )
     .map_err(io_error)?;
     Ok(())
@@ -645,6 +647,22 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 attempt.report.steam_cs2_launch_requested,
             ),
         }),
+        SupervisorControlCommand::OpenDiscord => {
+            if !status.action_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            match supervisor.open_discord() {
+                Ok(request) => {
+                    let _ = monitor_cycle(supervisor, detector, last_report)?;
+                    Ok(format!("OK DISCORD_LAUNCH_REQUESTED REQUEST={request} OUTCOME=UNVERIFIED"))
+                }
+                Err(error) => {
+                    eprintln!("authoritative Discord launch denied or failed: {error}");
+                    let _ = monitor_cycle(supervisor, detector, last_report)?;
+                    Ok("ERR DISCORD_LAUNCH".to_owned())
+                }
+            }
+        }
         SupervisorControlCommand::RememberPreferredApp { event_id, expected_generation, app } => {
             let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
             let id = EventId::new(format!("{event_id:032x}"))
@@ -856,6 +874,23 @@ fn last_handoff() -> Result<(), String> {
     }
     println!("{response}");
     println!("Dispatch history only; this does not verify a login, browser URL, anti-cheat readiness, or game state.");
+    Ok(())
+}
+
+fn open_discord() -> Result<(), String> {
+    let response = send_supervisor_control_request(SupervisorControlCommand::OpenDiscord)
+        .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+    if !response.starts_with("OK DISCORD_LAUNCH_REQUESTED ") {
+        return Err(match response.as_str() {
+            "ERR POLICY" => "Discord launch denied by the authoritative profile policy".to_owned(),
+            "ERR DISCORD_LAUNCH" => {
+                "Discord launcher could not be started; check the monitor console".to_owned()
+            }
+            _ => "authoritative supervisor returned an invalid Discord response".to_owned(),
+        });
+    }
+    println!("{response}");
+    println!("Launch request accepted; Discord startup or window state was not verified.");
     Ok(())
 }
 

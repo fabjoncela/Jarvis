@@ -1,5 +1,5 @@
-//! Narrow, reviewed Win32 FFI boundary for worker containment, the fixed
-//! pre-match handoff, and read-only competitive trigger observation.
+//! Narrow, reviewed Win32 FFI boundary for worker containment, fixed
+//! pre-match/Discord launches, and read-only competitive trigger observation.
 //!
 //! Target processes are opened only for limited identity queries; arbitrary
 //! process assignment, termination, and service-control APIs are not exposed.
@@ -391,8 +391,8 @@ impl Error for PreMatchSetupError {
 /// 730. This function is read-only. It never starts a service/process, opens a
 /// browser, reads credentials, or accepts a caller-provided target.
 pub fn verify_default_pre_match_setup() -> Result<VerifiedPreMatchSetup, PreMatchSetupError> {
-    let program_files = program_files_directory("ProgramFiles")?;
-    let program_files_x86 = program_files_directory("ProgramFiles(x86)")?;
+    let program_files = required_directory("ProgramFiles")?;
+    let program_files_x86 = required_directory("ProgramFiles(x86)")?;
 
     let faceit_root = program_files.join("FACEIT AC");
     let faceit_ac_launcher = fixed_regular_file(
@@ -476,6 +476,29 @@ pub fn launch_verified_pre_match_step(
         return Ok(PreMatchLaunchOutcome::FaceitTitleMatchDetected);
     }
     start_fixed_pre_match_process(executable, step).map(|()| PreMatchLaunchOutcome::Started)
+}
+
+/// One-use verified identity for the fixed Discord launcher. This does not
+/// override the supervisor's current profile or generation gate.
+pub struct VerifiedDiscordLauncher {
+    executable: PathBuf,
+}
+
+impl VerifiedDiscordLauncher {
+    /// Successful return means CreateProcess accepted the request, not that
+    /// Discord completed startup. Call only after fresh supervisor admission.
+    pub fn start(self) -> Result<(), Win32Error> {
+        start_fixed_process(&self.executable, "Discord.exe")
+    }
+}
+
+/// Resolves and trust-checks only the fixed Discord launcher under this
+/// account's Local AppData. No caller path or arguments are accepted.
+pub fn verify_fixed_discord_launcher() -> Result<VerifiedDiscordLauncher, PreMatchSetupError> {
+    let local_app_data = required_directory("LOCALAPPDATA")?;
+    let executable = fixed_regular_file(&local_app_data.join("Discord"), "Discord.exe", "Discord")?;
+    verify_trusted_signature(&executable, "Discord")?;
+    Ok(VerifiedDiscordLauncher { executable })
 }
 
 struct ChromeWindowScan<'a> {
@@ -603,9 +626,13 @@ fn start_fixed_pre_match_process(
     executable: &Path,
     step: PreMatchLaunchStep,
 ) -> Result<(), PreMatchLaunchError> {
+    start_fixed_process(executable, step.command_line())
+        .map_err(|source| PreMatchLaunchError::ProcessStart { step, source })
+}
+
+fn start_fixed_process(executable: &Path, command_line: &str) -> Result<(), Win32Error> {
     let application_name = wide_null(executable);
-    let mut command_line: Vec<u16> = step
-        .command_line()
+    let mut command_line: Vec<u16> = command_line
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -634,10 +661,7 @@ fn start_fixed_pre_match_process(
         )
     };
     if created == 0 {
-        return Err(PreMatchLaunchError::ProcessStart {
-            step,
-            source: last_error("CreateProcessW"),
-        });
+        return Err(last_error("CreateProcessW"));
     }
 
     // SAFETY: Both handles are owned by this successful CreateProcessW call.
@@ -650,7 +674,7 @@ fn start_fixed_pre_match_process(
     Ok(())
 }
 
-fn program_files_directory(variable: &'static str) -> Result<PathBuf, PreMatchSetupError> {
+fn required_directory(variable: &'static str) -> Result<PathBuf, PreMatchSetupError> {
     std::env::var_os(variable)
         .map(PathBuf::from)
         .ok_or(PreMatchSetupError::EnvironmentVariableMissing(variable))

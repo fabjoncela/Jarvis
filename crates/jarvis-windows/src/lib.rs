@@ -5,9 +5,9 @@
 //! The in-memory lifecycle adapter supports deterministic policy tests. The
 //! `WindowsWorkerManager` owns an opaque Job Object and can start only a
 //! fixed-manifest internal worker through the suspended-create, assign, verify,
-//! resume sequence. The only user-application launch path is the fixed
-//! confirmed pre-match handoff; it cannot adopt a PID or launch arbitrary
-//! executables.
+//! resume sequence. User-application launch paths are limited to the fixed
+//! confirmed pre-match handoff and fixed Discord launcher; neither can adopt
+//! a PID or launch an arbitrary executable.
 
 use std::error::Error;
 use std::fmt;
@@ -23,11 +23,12 @@ use jarvis_windows_ffi::{
 };
 pub use jarvis_windows_ffi::{
     observe_competitive_activity, observe_cs2_processes, send_supervisor_control_request,
-    verify_default_pre_match_setup, CompetitiveActivityObservationError,
-    CompetitiveActivitySnapshot, CompetitiveLifecycleNotifications, FixedCompetitiveProcess,
-    LifecycleNotificationFailure, ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep,
-    PreMatchSetupError, PreferredApp, ProcessObservationError, SupervisorControlCommand,
-    SupervisorControlPipeError, SupervisorControlPipeServer, VerifiedPreMatchSetup, Win32Error,
+    verify_default_pre_match_setup, verify_fixed_discord_launcher,
+    CompetitiveActivityObservationError, CompetitiveActivitySnapshot,
+    CompetitiveLifecycleNotifications, FixedCompetitiveProcess, LifecycleNotificationFailure,
+    ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError,
+    PreferredApp, ProcessObservationError, SupervisorControlCommand, SupervisorControlPipeError,
+    SupervisorControlPipeServer, VerifiedDiscordLauncher, VerifiedPreMatchSetup, Win32Error,
     WorkerLaunchError,
 };
 

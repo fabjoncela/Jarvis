@@ -2,7 +2,8 @@
 
 Jarvis is an offline-first Windows desktop assistant written primarily in Rust.
 Its current V1 foundation has no general desktop-action executor. It includes
-one user-confirmed fixed pre-match handoff for FACEIT AC, Chrome, and CS2:
+one user-confirmed fixed pre-match handoff for FACEIT AC, Chrome, and CS2,
+plus one fixed Discord launcher:
 
 - a profile/generation safety model, exercised through unit tests;
 - a serialized supervisor foundation with one explicit resident monitor as the
@@ -30,7 +31,7 @@ scaffold. There is no installed Windows service, automatic startup, general
 multi-worker lifecycle, or arbitrary desktop action executor. The explicit
 `--monitor-competitive` process owns resident policy and monitors only the fixed
 CS2/FACEIT triggers described below. Commands that start an internal worker or
-launch the fixed pre-match sequence require that owner; they fail closed when it
+launch the fixed pre-match sequence or Discord require that owner; they fail closed when it
 is absent. Validation-only CLI commands remain process-local and make no
 machine-wide protection claim.
 
@@ -122,7 +123,7 @@ and keep Competitive Mode restricted. God Mode is restored only after a
 healthy snapshot confirms all fixed triggers are inactive. This is an opt-in
 process, not an installed Windows service or automatic startup monitor. It is
 the sole authority for the current Windows
-account while running; supported worker-start and pre-match clients
+account while running; supported worker-start, Discord, and pre-match clients
 consult it over the fixed control pipe. The polling policy and Job Object end
 when the process exits. Other Windows accounts are unsupported by this
 single-owner endpoint.
@@ -141,6 +142,12 @@ immediately reconciles the newly started FACEIT/CS2 triggers.
 It reports which fixed launch steps were requested, including partial failures,
 but never treats dispatch as proof that FACEIT, the browser page, or CS2 is ready.
 The record is in memory and disappears when the monitor exits.
+
+`--open-discord` asks the resident supervisor to launch only the fixed,
+signature-checked Discord executable under this account's Local AppData.
+It is denied when Competitive Mode closes the action gate. The result is a
+launch request, not proof that Discord finished starting. The existing
+`--route "Jarvis, open Discord"` command remains validation-only.
 
 `--pre-match-setup-self-check` verifies that exact local handoff setup without
 starting anything: fixed Program Files locations, valid Windows Authenticode

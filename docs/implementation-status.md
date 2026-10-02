@@ -19,7 +19,8 @@ pre-match launch sequence, not a running desktop assistant:
    collisions, and external cleanup targets. It does not certify FACEIT
    compatibility or a local FACEIT identity.
 5. `jarvis-actions` accepts only typed, configured plans. There is no general
-   action executor; the pre-match capability has its own fixed supervisor path.
+   action executor; the pre-match capability and fixed Discord launcher have
+   separate supervisor-owned paths.
 6. `jarvis-router` performs conservative normalization, config-derived exact
    aliases, and a bounded `set volume to <0..100>` pattern.
 7. `jarvis-windows-ffi` owns the only reviewed raw Win32 calls. It creates an
@@ -65,7 +66,7 @@ pre-match launch sequence, not a running desktop assistant:
     `--detection-self-check` runs one reconciliation cycle and exits. For the
     current Windows account, the monitor owns one exclusive, owner-only local
     named pipe with a fixed protocol (`STATUS`, `PREPARE_FACEIT_CS2`,
-    `WORKER_SELF_CHECK`, and bounded preferred-app state/save/clear/restore
+    `WORKER_SELF_CHECK`, `LAST_HANDOFF`, `OPEN_DISCORD`, and bounded preferred-app state/save/clear/restore
     commands).
     It rejects remote clients and validates the connected
     client's executable path. Handoff and worker-start CLI commands require
@@ -118,8 +119,8 @@ pre-match launch sequence, not a running desktop assistant:
   deliberately changed. This is not a reason to elevate or weaken permissions
   automatically.
 - general desktop application, audio, browser, file, service, or system action
-  execution; only the fixed confirmation-gated pre-match sequence can launch
-  the FACEIT AC launcher, Chrome, and Steam app 730
+  execution; only the fixed confirmation-gated pre-match sequence and the
+  fixed Discord command can currently launch user applications
 - general-purpose memory commands or a learning pipeline, general-purpose IPC, tray
   UI, microphone, STT, TTS, Qwen, or learning workers
 
@@ -154,7 +155,7 @@ authoritative, and do not add a general executable- or PID-based API.
 
 The resident monitor was updated while detection was healthy and CS2, the
 verified FACEIT launcher, and `FACEITService` were inactive. It now runs from
-`target\next-memory-ui\debug\jarvis.exe` as an explicit hidden process, not
+`target\next-discord-action\debug\jarvis.exe` as an explicit hidden process, not
 an installed service or automatic-start application. Status and preferred-app
 read/empty-clear/canceled-save commands were exercised through its fixed pipe.
 The read created an empty `%LOCALAPPDATA%\Jarvis\jarvis.db`; no preference was
@@ -212,6 +213,17 @@ dispatch history. It records rejected, stopped, or fully dispatched attempts
 with per-step flags; the outcome is always labelled unverified. It does not
 launch, inspect tabs, verify a login, or certify anti-cheat/game readiness.
 The record is lost on monitor restart.
+
+## Fixed Discord launch smoke result (2 October 2026)
+
+`--open-discord` was sent once through the resident monitor while its latest
+snapshot was healthy God Mode and CS2/FACEIT triggers were inactive. The owner
+reported a launch request accepted. A separate read-only process query then
+found Discord processes under this account's local Discord installation.
+This is evidence that Discord started, but the current command still does not
+verify a ready window or login. The unit tests deny the action in Competitive
+Mode and reject an old request generation after profile restoration. No
+FACEIT, Chrome, Steam, or CS2 process was launched or closed for this test.
 
 ## One-time Chrome FACEIT title check
 

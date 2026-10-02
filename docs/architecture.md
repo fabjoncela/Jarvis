@@ -18,8 +18,8 @@ configuration bundle before it constructs the router or registry. The explicit
 `--monitor-competitive` process is the sole resident policy owner for the
 current Windows account. It owns an opaque reviewed Win32 Job Object and a fixed
 manifest for the checked-in session worker. A same-user local named pipe with a
-strict three-command protocol carries status, the fixed confirmed pre-match
-handoff, and the worker containment self-check. Its DACL is owner-only, remote
+strict fixed-command protocol carries status, the fixed confirmed pre-match
+handoff, Discord launch, and the worker containment self-check. Its DACL is owner-only, remote
 clients are rejected, one pipe instance is exclusive, and peers must resolve
 to the same Jarvis executable image. Action and worker-start requests are
 serialized on the owner; supported clients fail closed when it is absent. The
@@ -71,8 +71,15 @@ supervisor rechecks profile admission before each step, and each fixed launch
 repeats local identity verification. The monitor serializes the handoff with
 polling and immediately reconciles after it. Jarvis does not start
 `FACEITService` directly; the official launcher manages its own dependencies.
-If a step fails, later steps stop and the partial completion is reported in the
-monitor console.
+If a step fails, later steps stop and the partial dispatch history remains
+available through `--last-handoff` until the monitor exits.
+
+The separate `--open-discord` command is the first narrow desktop action. It
+validates the registered Discord action and current profile generation on the
+resident owner, then starts only the fixed signed launcher under Local AppData.
+It cannot accept a path or arguments. A successful CreateProcess return is
+reported as dispatch, not verified application readiness. It is never
+available while Competitive Mode closes the action gate.
 
 The native setup check is read-only: it accepts only FACEIT's fixed
 Anti-Cheat Launcher/service locations under Program Files, verifies their Windows trust,
