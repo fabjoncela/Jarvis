@@ -152,6 +152,7 @@ dependencies = [
  "jarvis-gaming",
  "jarvis-profiles",
  "jarvis-router",
+ "jarvis-session-context",
  "jarvis-storage",
  "jarvis-verification",
  "jarvis-windows",
