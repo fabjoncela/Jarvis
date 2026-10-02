@@ -18,6 +18,7 @@ use jarvis_profiles::{
     TransitionStart, TransitionState,
 };
 use jarvis_router::{RouteResult, Router};
+use jarvis_session_context::SessionContext;
 use jarvis_storage::{
     CanonicalId, CorrectionTerm, EventId, PreferenceKey, RecordOutcome, ReferenceId, StorageError,
     Store, StoredPreference, StoredPreferenceTombstone,
@@ -322,6 +323,7 @@ pub struct Supervisor {
     healthy_clear_since: Option<Instant>,
     last_handoff_attempt: Option<LastHandoffAttempt>,
     last_discord_execution: Option<DiscordExecution>,
+    session_context: SessionContext,
 }
 
 impl Supervisor {
@@ -351,6 +353,7 @@ impl Supervisor {
             healthy_clear_since: None,
             last_handoff_attempt: None,
             last_discord_execution: None,
+            session_context: SessionContext::new(ProfileGeneration::initial()),
         })
     }
 
@@ -567,6 +570,9 @@ impl Supervisor {
             .expect("fixed nonzero verification window");
         case.record_dispatch(anchor, DispatchState::Accepted, now, request.generation)
             .expect("fresh execution dispatch");
+        self.session_context
+            .record_execution(anchor, None, now, request.generation)
+            .expect("serialized fresh Discord dispatch");
         self.last_discord_execution = Some(DiscordExecution { reference, case });
         reference
     }
@@ -600,6 +606,30 @@ impl Supervisor {
                 self.controller.generation(),
             )
             .map_err(DiscordFeedbackError::Verification)
+    }
+
+    /// Resolve a recent unambiguous Discord dispatch for a shorthand user
+    /// report. Session context only selects an anchor; it grants no action or
+    /// machine-verification authority.
+    pub fn record_latest_discord_feedback(
+        &mut self,
+        kind: FeedbackKind,
+    ) -> Result<RecordResult, DiscordFeedbackError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.controller
+            .authorize_action(request)
+            .map_err(DiscordFeedbackError::Gate)?;
+        let anchor = self
+            .session_context
+            .resolve_feedback_anchor(Instant::now(), self.controller.generation())
+            .ok_or(DiscordFeedbackError::UnknownExecution)?;
+        let reference = self
+            .last_discord_execution
+            .as_ref()
+            .filter(|execution| execution.case.anchor() == anchor)
+            .map(|execution| execution.reference)
+            .ok_or(DiscordFeedbackError::UnknownExecution)?;
+        self.record_discord_feedback(reference, kind)
     }
 
     /// Read-only current-process observation in God Mode. Presence is not
@@ -719,6 +749,7 @@ impl Supervisor {
     ) -> Result<CompetitiveEntryResult, CompetitiveEntryError> {
         self.healthy_clear_since = None;
         let start = self.controller.enter_competitive(cause);
+        self.session_context.clear();
         if let Some(execution) = self.last_discord_execution.as_mut() {
             execution
                 .case
@@ -1133,6 +1164,35 @@ mod tests {
         assert_eq!(
             supervisor.record_discord_feedback(reference, FeedbackKind::Worked),
             Err(DiscordFeedbackError::UnknownExecution)
+        );
+    }
+
+    #[test]
+    fn latest_discord_feedback_requires_one_unambiguous_recent_execution() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        assert_eq!(
+            supervisor.record_latest_discord_feedback(FeedbackKind::Worked),
+            Err(DiscordFeedbackError::UnknownExecution)
+        );
+        let first = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        supervisor.record_discord_dispatch(first);
+        assert_eq!(
+            supervisor.record_latest_discord_feedback(FeedbackKind::Worked),
+            Ok(RecordResult::Recorded)
+        );
+        let second = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        supervisor.record_discord_dispatch(second);
+        assert_eq!(
+            supervisor.record_latest_discord_feedback(FeedbackKind::Worked),
+            Err(DiscordFeedbackError::UnknownExecution)
+        );
+        supervisor
+            .enter_competitive(TransitionCause::Cs2Process)
+            .unwrap();
+        assert!(supervisor.session_context.is_empty());
+        assert_eq!(
+            supervisor.record_latest_discord_feedback(FeedbackKind::Worked),
+            Err(DiscordFeedbackError::Gate(GateError::ProfileRestricted))
         );
     }
 

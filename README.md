@@ -16,9 +16,9 @@ plus one fixed Discord launcher and one typed master-volume action:
 - strict, all-or-nothing TOML configuration validation;
 - typed, allowlisted action plans;
 - deterministic alias and volume-pattern routing;
-- bounded RAM-only session-context and result-verification contracts (not yet
-  wired to trusted machine observation; the Discord launch has an exact,
-  short-lived, RAM-only user-feedback anchor);
+- bounded RAM-only session-context and result-verification contracts (Discord
+  dispatches now register exact feedback anchors with the resident supervisor;
+  trusted machine observation and a general session worker are not wired);
 - a private SQLite store for explicit preferred-app memory, revision-bound
   clear/restore, and backup before an existing database migration;
 - competitive-mode policy logic with testable in-memory worker lifecycles;
@@ -182,6 +182,11 @@ dispatch. Duplicate identical reports are idempotent, conflicting reports are
 rejected, and Competitive Mode or a profile-generation change invalidates the
 anchor. Feedback is RAM-only and disappears when the monitor exits. It is not
 machine verification and never proves Discord became ready.
+`--feedback-last-discord worked|failed` can omit the reference only when one
+recent Discord dispatch is unambiguous. Two launches within 15 seconds of the
+latest require the explicit `FEEDBACK_REF`; an old, expired, or
+Competitive-invalidated context cannot select an execution. This shorthand
+still records only a user report.
 
 `--pre-match-setup-self-check` verifies that exact local handoff setup without
 starting anything: fixed Program Files locations, valid Windows Authenticode

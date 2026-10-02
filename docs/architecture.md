@@ -102,6 +102,12 @@ requires a signed image in the fixed versioned installation layout, and
 returns unknown on identity failures. It is not available while Competitive
 Mode closes the action gate and does not establish a ready window, login, or
 causal link to an earlier launch request.
+The resident supervisor now records each fixed Discord dispatch in its bounded
+RAM-only session context. `--feedback-last-discord` can select only a recent,
+unambiguous anchor; it delegates to the same exact verification case used by
+reference-bearing feedback. Context is cleared on Competitive entry and never
+authorizes an action or creates trusted machine evidence. General target
+resolution and the session worker remain future work.
 
 The native setup check is read-only: it accepts only FACEIT's fixed
 Anti-Cheat Launcher/service locations under Program Files, verifies their Windows trust,

@@ -97,8 +97,9 @@ pre-match launch sequence, not a running desktop assistant:
     wired to OS observation or live action execution.
 16. `jarvis-session-context` provides bounded RAM-only target and exact
     execution-anchor history, with TTLs, ambiguity rejection, and monotonic
-    profile-generation invalidation. It stores no transcripts and is not yet
-    connected to the placeholder session worker.
+    profile-generation invalidation. It stores no transcripts. Discord
+    dispatches now register an anchor in the resident supervisor's context;
+    the placeholder session worker is still not connected.
 17. Storage has revision-bound preference forget/restore operations.
     A tombstone keeps audit history and blocks stale save retries; explicit
     restoration requires its exact event ID. `--clear-preferred-app` asks for
@@ -136,6 +137,11 @@ pre-match launch sequence, not a running desktop assistant:
     fixed endpoint in God Mode. It is denied by the profile gate during
     Competitive Mode. Its scalar is reported as an approximate percentage,
     not evidence of audible output.
+23. `--feedback-last-discord worked|failed` uses the bounded session context
+    to resolve a single recent Discord execution anchor. Two launches within
+    its 15-second ambiguity window are rejected, as are expired or
+    generation-invalidated anchors. The reference-bearing feedback command
+    remains available for exact selection. Neither path verifies success.
 
 ## Read-only volume smoke result (3 October 2026)
 

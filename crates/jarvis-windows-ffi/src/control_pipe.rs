@@ -107,6 +107,9 @@ pub enum SupervisorControlCommand {
         reference: u128,
         kind: DiscordFeedback,
     },
+    FeedbackLatestDiscord {
+        kind: DiscordFeedback,
+    },
     PrepareFaceitCs2,
     WorkerSelfCheck,
     RememberPreferredApp {
@@ -141,6 +144,8 @@ impl SupervisorControlCommand {
                 format!("JARVIS/1 SET_MASTER_VOLUME {percent}").into_bytes(),
             Self::FeedbackDiscord { reference, kind } =>
                 format!("{FEEDBACK_DISCORD_PREFIX}{reference:032x} {}", kind.wire()).into_bytes(),
+            Self::FeedbackLatestDiscord { kind } =>
+                format!("JARVIS/1 FEEDBACK_LATEST_DISCORD {}", kind.wire()).into_bytes(),
             Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2".to_vec(),
             Self::WorkerSelfCheck => b"JARVIS/1 WORKER_SELF_CHECK".to_vec(),
             Self::RememberPreferredApp {
@@ -177,6 +182,14 @@ impl SupervisorControlCommand {
             b"JARVIS/1 PREFERRED_APP_STATE" => Some(Self::PreferredAppState),
             _ => {
                 let text = std::str::from_utf8(bytes).ok()?;
+                if let Some(value) = text.strip_prefix("JARVIS/1 FEEDBACK_LATEST_DISCORD ") {
+                    let kind = match value {
+                        "WORKED" => DiscordFeedback::Worked,
+                        "FAILED" => DiscordFeedback::Failed,
+                        _ => return None,
+                    };
+                    return Some(Self::FeedbackLatestDiscord { kind });
+                }
                 if let Some(value) = text.strip_prefix("JARVIS/1 SET_MASTER_VOLUME ") {
                     if value.is_empty()
                         || value.len() > 3
@@ -804,7 +817,16 @@ mod tests {
                 SupervisorControlCommand::parse(&command.wire()),
                 Some(command)
             );
+            let latest = SupervisorControlCommand::FeedbackLatestDiscord { kind };
+            assert_eq!(
+                SupervisorControlCommand::parse(&latest.wire()),
+                Some(latest)
+            );
         }
+        assert_eq!(
+            SupervisorControlCommand::parse(b"JARVIS/1 FEEDBACK_LATEST_DISCORD MAYBE"),
+            None
+        );
         assert_eq!(
             SupervisorControlCommand::parse(
                 b"JARVIS/1 FEEDBACK_DISCORD 00000000000000000000000000001234 MAYBE"

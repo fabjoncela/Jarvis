@@ -63,6 +63,9 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag, reference, kind] if flag == "--feedback-discord" => {
             return feedback_discord(reference, kind);
         }
+        [flag, kind] if flag == "--feedback-last-discord" => {
+            return feedback_last_discord(kind);
+        }
         [flag, command] if flag == "--execute" => {
             return execute_text_command(command, configuration_directory);
         }
@@ -97,7 +100,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --feedback-last-discord <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -738,6 +741,23 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 }
             }
         }
+        SupervisorControlCommand::FeedbackLatestDiscord { kind } => {
+            if !status.action_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            let feedback = match kind {
+                DiscordFeedback::Worked => FeedbackKind::Worked,
+                DiscordFeedback::Failed => FeedbackKind::Failed,
+            };
+            match supervisor.record_latest_discord_feedback(feedback) {
+                Ok(RecordResult::Recorded) => Ok("OK DISCORD_FEEDBACK RECORDED OUTCOME=UNVERIFIED".to_owned()),
+                Ok(RecordResult::AlreadyRecorded) => Ok("OK DISCORD_FEEDBACK ALREADY_RECORDED OUTCOME=UNVERIFIED".to_owned()),
+                Err(error) => {
+                    eprintln!("latest Discord feedback rejected: {error:?}");
+                    Ok("ERR DISCORD_FEEDBACK".to_owned())
+                }
+            }
+        }
         SupervisorControlCommand::RememberPreferredApp { event_id, expected_generation, app } => {
             let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
             let id = EventId::new(format!("{event_id:032x}"))
@@ -980,16 +1000,29 @@ fn feedback_discord(reference: &str, kind: &str) -> Result<(), String> {
     }
     let reference =
         u128::from_str_radix(reference, 16).map_err(|_| "invalid feedback reference".to_owned())?;
-    let kind = match kind {
-        "worked" => DiscordFeedback::Worked,
-        "failed" => DiscordFeedback::Failed,
-        _ => return Err("feedback must be worked or failed".to_owned()),
-    };
-    let response = send_supervisor_control_request(SupervisorControlCommand::FeedbackDiscord {
+    send_discord_feedback(SupervisorControlCommand::FeedbackDiscord {
         reference,
-        kind,
+        kind: parse_discord_feedback_kind(kind)?,
     })
-    .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+}
+
+fn feedback_last_discord(kind: &str) -> Result<(), String> {
+    send_discord_feedback(SupervisorControlCommand::FeedbackLatestDiscord {
+        kind: parse_discord_feedback_kind(kind)?,
+    })
+}
+
+fn parse_discord_feedback_kind(kind: &str) -> Result<DiscordFeedback, String> {
+    match kind {
+        "worked" => Ok(DiscordFeedback::Worked),
+        "failed" => Ok(DiscordFeedback::Failed),
+        _ => Err("feedback must be worked or failed".to_owned()),
+    }
+}
+
+fn send_discord_feedback(command: SupervisorControlCommand) -> Result<(), String> {
+    let response = send_supervisor_control_request(command)
+        .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
     match response.as_str() {
         "OK DISCORD_FEEDBACK RECORDED OUTCOME=UNVERIFIED" => {
             println!("Feedback recorded for that Discord launch. This is a user report, not machine verification.");
