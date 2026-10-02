@@ -205,6 +205,14 @@ FACEIT launcher, and FACEIT service all inactive. This confirms the final
 all-clear state, but not the exact transition timing or in-game state at exit.
 Jarvis continues to observe `FACEITService` read-only and does not stop it.
 
+## Last handoff dispatch history
+
+The resident monitor now exposes `--last-handoff` as read-only, process-local
+dispatch history. It records rejected, stopped, or fully dispatched attempts
+with per-step flags; the outcome is always labelled unverified. It does not
+launch, inspect tabs, verify a login, or certify anti-cheat/game readiness.
+The record is lost on monitor restart.
+
 ## One-time Chrome FACEIT title check
 
 The fixed Chrome step now makes one best-effort pass over visible top-level

@@ -81,6 +81,21 @@ pub enum PreMatchHandoffRequestError {
     Execution(PreMatchHandoffError),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandoffAttemptState {
+    Rejected,
+    Stopped,
+    Dispatched,
+}
+
+/// Process-local dispatch history, not proof that FACEIT, Chrome, or CS2 is ready.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LastHandoffAttempt {
+    pub request: RequestContext,
+    pub state: HandoffAttemptState,
+    pub report: PreMatchHandoffReport,
+}
+
 impl fmt::Display for PreMatchHandoffRequestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -226,6 +241,7 @@ pub struct Supervisor {
     worker_manifest: WorkerManifest,
     worker_manager: WindowsWorkerManager,
     healthy_clear_since: Option<Instant>,
+    last_handoff_attempt: Option<LastHandoffAttempt>,
 }
 
 impl Supervisor {
@@ -253,6 +269,7 @@ impl Supervisor {
             worker_manifest: WorkerManifest,
             worker_manager,
             healthy_clear_since: None,
+            last_handoff_attempt: None,
         })
     }
 
@@ -270,6 +287,10 @@ impl Supervisor {
             configured_internal_worker_count: self.worker_manifest.all().len(),
             faceit_setup_status: self.configuration.faceit_setup_status(),
         })
+    }
+
+    pub fn last_handoff_attempt(&self) -> Option<LastHandoffAttempt> {
+        self.last_handoff_attempt
     }
 
     /// Appends an explicit typed preference. Store opening and migration work
@@ -393,23 +414,42 @@ impl Supervisor {
         user_confirmed: bool,
     ) -> Result<PreMatchHandoffReport, PreMatchHandoffRequestError> {
         let request = RequestContext::new(RequestId::next(), self.controller.generation());
-        let validated = self
-            .registry
-            .validate(
-                ActionPlan::single(Action::StartCompetitiveHandoff),
-                request,
-                &self.controller,
-            )
-            .map_err(PreMatchHandoffRequestError::Validation)?;
-        if !validated.requires_confirmation() || !user_confirmed {
-            return Err(PreMatchHandoffRequestError::ConfirmationRequired);
-        }
+        let result = (|| {
+            let validated = self
+                .registry
+                .validate(
+                    ActionPlan::single(Action::StartCompetitiveHandoff),
+                    request,
+                    &self.controller,
+                )
+                .map_err(PreMatchHandoffRequestError::Validation)?;
+            if !validated.requires_confirmation() || !user_confirmed {
+                return Err(PreMatchHandoffRequestError::ConfirmationRequired);
+            }
 
-        ensure_cs2_not_running(&mut WindowsCs2ProcessSource)
-            .map_err(|error| PreMatchHandoffRequestError::Readiness(error.to_string()))?;
+            ensure_cs2_not_running(&mut WindowsCs2ProcessSource)
+                .map_err(|error| PreMatchHandoffRequestError::Readiness(error.to_string()))?;
 
-        run_pre_match_handoff(|| self.controller.authorize_action(request))
-            .map_err(PreMatchHandoffRequestError::Execution)
+            run_pre_match_handoff(|| self.controller.authorize_action(request))
+                .map_err(PreMatchHandoffRequestError::Execution)
+        })();
+        let (state, report) = match &result {
+            Ok(report) => (HandoffAttemptState::Dispatched, *report),
+            Err(PreMatchHandoffRequestError::Execution(
+                PreMatchHandoffError::Authorization { completed, .. }
+                | PreMatchHandoffError::Launch { completed, .. },
+            )) => (HandoffAttemptState::Stopped, *completed),
+            Err(_) => (
+                HandoffAttemptState::Rejected,
+                PreMatchHandoffReport::empty(),
+            ),
+        };
+        self.last_handoff_attempt = Some(LastHandoffAttempt {
+            request,
+            state,
+            report,
+        });
+        result
     }
 
     /// Starts one fixed internal worker only after the current profile gate
@@ -759,6 +799,10 @@ mod tests {
             supervisor.prepare_faceit_cs2(false),
             Err(PreMatchHandoffRequestError::ConfirmationRequired)
         ));
+        let attempt = supervisor.last_handoff_attempt().expect("attempt recorded");
+        assert_eq!(attempt.state, HandoffAttemptState::Rejected);
+        assert_eq!(attempt.report, PreMatchHandoffReport::empty());
+        assert_eq!(attempt.request.generation, ProfileGeneration::initial());
     }
 
     #[test]
@@ -775,6 +819,9 @@ mod tests {
                 ValidationError::ProfileGate(GateError::ProfileRestricted)
             ))
         ));
+        let attempt = supervisor.last_handoff_attempt().expect("denial recorded");
+        assert_eq!(attempt.state, HandoffAttemptState::Rejected);
+        assert_eq!(attempt.report, PreMatchHandoffReport::empty());
     }
 
     #[test]

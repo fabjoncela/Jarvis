@@ -40,7 +40,7 @@ pub struct PreMatchHandoffReport {
 }
 
 impl PreMatchHandoffReport {
-    const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             faceit_ac_launcher_started: false,
             chrome_faceit_url_requested: false,

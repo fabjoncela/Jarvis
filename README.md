@@ -137,6 +137,11 @@ step fails, later steps are skipped; the monitor console records partial
 progress. The monitor serializes the sequence with profile updates, then
 immediately reconciles the newly started FACEIT/CS2 triggers.
 
+`--last-handoff` reads the resident supervisor's most recent handoff attempt.
+It reports which fixed launch steps were requested, including partial failures,
+but never treats dispatch as proof that FACEIT, the browser page, or CS2 is ready.
+The record is in memory and disappears when the monitor exits.
+
 `--pre-match-setup-self-check` verifies that exact local handoff setup without
 starting anything: fixed Program Files locations, valid Windows Authenticode
 trust for the FACEIT Anti-Cheat Launcher/Service, Chrome, and Steam binaries,

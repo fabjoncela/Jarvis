@@ -49,6 +49,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--prepare-faceit-cs2" => return prepare_faceit_cs2(),
         [flag] if flag == "--worker-self-check" => return worker_self_check_client(),
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
+        [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--show-preferred-app" => return show_preferred_app(),
         [flag] if flag == "--clear-preferred-app" => return clear_preferred_app(),
         [flag, app] if flag == "--remember-preferred-app" => {
@@ -80,7 +81,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -631,6 +632,19 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
             observation.snapshot.verified_faceit_process_running,
             observation.snapshot.verified_faceit_service_active,
         )),
+        SupervisorControlCommand::LastHandoff => Ok(match supervisor.last_handoff_attempt() {
+            None => "OK LAST_HANDOFF NONE".to_owned(),
+            Some(attempt) => format!(
+                "OK LAST_HANDOFF REQUEST={} GENERATION={} STATE={:?} FACEIT_LAUNCH_REQUESTED={} CHROME_URL_REQUESTED={} FACEIT_TITLE_MATCH={} STEAM_CS2_LAUNCH_REQUESTED={} OUTCOME=UNVERIFIED",
+                attempt.request.request_id,
+                attempt.request.generation.value(),
+                attempt.state,
+                attempt.report.faceit_ac_launcher_started,
+                attempt.report.chrome_faceit_url_requested,
+                attempt.report.chrome_faceit_title_match_detected,
+                attempt.report.steam_cs2_launch_requested,
+            ),
+        }),
         SupervisorControlCommand::RememberPreferredApp { event_id, expected_generation, app } => {
             let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
             let id = EventId::new(format!("{event_id:032x}"))
@@ -829,6 +843,19 @@ fn supervisor_status(diagnostics: bool) -> Result<(), String> {
             request_started_at.elapsed().as_micros()
         );
     }
+    Ok(())
+}
+
+fn last_handoff() -> Result<(), String> {
+    let response = send_supervisor_control_request(SupervisorControlCommand::LastHandoff)
+        .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+    if !response.starts_with("OK LAST_HANDOFF ") {
+        return Err(
+            "authoritative supervisor returned an invalid handoff status response".to_owned(),
+        );
+    }
+    println!("{response}");
+    println!("Dispatch history only; this does not verify a login, browser URL, anti-cheat readiness, or game state.");
     Ok(())
 }
 

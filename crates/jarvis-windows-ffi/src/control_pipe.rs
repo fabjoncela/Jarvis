@@ -80,6 +80,7 @@ impl PreferredApp {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SupervisorControlCommand {
     Status,
+    LastHandoff,
     PrepareFaceitCs2,
     WorkerSelfCheck,
     RememberPreferredApp {
@@ -106,6 +107,7 @@ impl SupervisorControlCommand {
     fn wire(self) -> Vec<u8> {
         match self {
             Self::Status => b"JARVIS/1 STATUS".to_vec(),
+            Self::LastHandoff => b"JARVIS/1 LAST_HANDOFF".to_vec(),
             Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2".to_vec(),
             Self::WorkerSelfCheck => b"JARVIS/1 WORKER_SELF_CHECK".to_vec(),
             Self::RememberPreferredApp {
@@ -132,6 +134,7 @@ impl SupervisorControlCommand {
         }
         match bytes {
             b"JARVIS/1 STATUS" => Some(Self::Status),
+            b"JARVIS/1 LAST_HANDOFF" => Some(Self::LastHandoff),
             b"JARVIS/1 PREPARE_FACEIT_CS2" => Some(Self::PrepareFaceitCs2),
             b"JARVIS/1 WORKER_SELF_CHECK" => Some(Self::WorkerSelfCheck),
             b"JARVIS/1 SHOW_PREFERRED_APP" => Some(Self::ShowPreferredApp),
@@ -716,6 +719,10 @@ mod tests {
         assert_eq!(
             SupervisorControlCommand::parse(b"JARVIS/1 STATUS"),
             Some(SupervisorControlCommand::Status)
+        );
+        assert_eq!(
+            SupervisorControlCommand::parse(&SupervisorControlCommand::LastHandoff.wire()),
+            Some(SupervisorControlCommand::LastHandoff)
         );
         assert_eq!(SupervisorControlCommand::parse(b"run powershell"), None);
         assert_eq!(
