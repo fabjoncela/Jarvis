@@ -41,6 +41,12 @@ impl Router {
         if normalized.is_empty() {
             return RouteResult::Unknown;
         }
+        if matches!(
+            normalized.as_str(),
+            "prepare faceit cs2" | "prepare competitive session"
+        ) {
+            return RouteResult::Plan(ActionPlan::single(Action::StartCompetitiveHandoff));
+        }
         if let Some(action) = self.aliases.get(&normalized) {
             return RouteResult::Plan(ActionPlan::single(action.clone()));
         }
@@ -100,5 +106,15 @@ mod tests {
             router.route("set volume to 101"),
             RouteResult::InvalidPattern { .. }
         ));
+    }
+
+    #[test]
+    fn pre_match_handoff_uses_only_the_fixed_phrase_and_typed_action() {
+        let router = router();
+        assert_eq!(
+            router.route("Jarvis, prepare FACEIT CS2"),
+            RouteResult::Plan(ActionPlan::single(Action::StartCompetitiveHandoff))
+        );
+        assert_eq!(router.route("open faceit"), RouteResult::Unknown);
     }
 }

@@ -35,21 +35,33 @@ running desktop assistant:
    and permits restart only after that verified empty state. It exposes no API
    to open or adopt a PID, or launch a user-supplied executable.
 9. `jarvis-gaming` models competitive transitions against testable in-memory
-   lifecycle boundaries; it is not wired to a live detector or runtime.
+   lifecycle boundaries. It also has a read-only, fixed-name `cs2.exe` Tool
+   Help snapshot source that records PID plus creation-time identity. Its
+   detector fails closed when that snapshot is unavailable or when FACEIT setup
+   remains unverified.
+10. The supervisor can enter Competitive Mode through the real fixed-worker
+    manager: it closes both gates first, verifies its owned Job Object is empty,
+    and records a restricted fault if containment cannot be verified.
+11. The router and action validator model a single fixed, confirmation-required
+    pre-match handoff: verified FACEIT client, Chrome opening `faceit.com`
+    without authentication, then Steam app 730. It has no executor, so this is
+    a validated intent rather than an external action.
 
 ## Explicitly not implemented
 
 - general worker IPC, a multi-worker lifecycle, or any worker capability beyond
   the fixed session worker's cooperative exit event
-- a Windows service, Windows process/service event subscriptions, or FACEIT
-  identity verification
+- a Windows service, process/service event subscriptions, or FACEIT process or
+  service identity verification
 - actual application, audio, browser, file, service, or system actions
 - SQLite, IPC, tray UI, microphone, STT, TTS, Qwen, or learning
 - any CS2/FACEIT interaction beyond abstract trigger names used in tests
 
 ## Next milestone
 
-Add ordinary process/service lifecycle observation and verify Competitive Mode
-containment with the real fixed-worker manager before introducing a single
-action executor or AI/voice worker. Keep detection fail-closed and do not add
-a general executable- or PID-based API.
+Implement explicit local setup verification for the FACEIT client/service,
+Chrome, and Steam identities, then add the narrow pre-match executor with a
+fresh confirmation and re-verification immediately before each step. After
+that, add ordinary process/service lifecycle subscriptions plus startup
+reconciliation. Keep detection fail-closed and do not add a general
+executable- or PID-based API.

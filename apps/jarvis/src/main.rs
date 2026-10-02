@@ -13,6 +13,8 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use jarvis_gaming::{FailClosedTriggerDetector, WindowsCs2ProcessSource};
+use jarvis_profiles::TransitionCause;
 use jarvis_windows::InternalWorker;
 use supervisor::{RouteOutcome, Supervisor};
 
@@ -37,8 +39,10 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag, command] if flag == "--route" => route(command, &mut supervisor),
         [flag] if flag == "--serve-stdin" => serve_stdin(&mut supervisor),
         [flag] if flag == "--worker-self-check" => worker_self_check(&mut supervisor),
+        [flag] if flag == "--competitive-self-check" => competitive_self_check(&mut supervisor),
+        [flag] if flag == "--detection-self-check" => detection_self_check(&mut supervisor),
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check]"
                 .to_owned(),
         ),
     }
@@ -57,7 +61,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     writeln!(output, "runtime supervisor: active for this process").map_err(io_error)?;
     writeln!(
         output,
-        "competitive process/service monitoring: not implemented"
+        "competitive process/service monitoring: not implemented; read-only CS2 snapshot: --detection-self-check"
     )
     .map_err(io_error)?;
     writeln!(
@@ -240,6 +244,57 @@ fn checked_worker_cycle(
         return Err("worker self-check did not observe a clean cooperative worker exit".to_owned());
     }
     Ok(identity)
+}
+
+/// Exercises the serialized Competitive Mode gate and real owned-worker
+/// manager without observing a game, FACEIT, service, or desktop application.
+fn competitive_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
+    let result = supervisor
+        .enter_competitive(TransitionCause::Manual)
+        .map_err(|error| format!("competitive self-check failed: {error}"))?;
+    if !result.clean_shutdown || result.used_forced_termination {
+        return Err(
+            "competitive self-check did not verify a clean owned-worker shutdown".to_owned(),
+        );
+    }
+    let status = supervisor.status().map_err(|error| error.to_string())?;
+    println!("Jarvis Competitive Mode containment self-check");
+    println!("profile: {:?}", status.profile);
+    println!("transition: {:?}", status.transition);
+    println!("action gate: {}", status.action_gate_open);
+    println!("worker-start gate: {}", status.worker_start_gate_open);
+    println!(
+        "owned Job Object: verified empty; active processes: {}",
+        status.active_owned_worker_processes
+    );
+    println!("execution: no game, FACEIT component, service, or desktop application was observed or changed");
+    Ok(())
+}
+
+/// Runs the ordinary read-only CS2 snapshot once. FACEIT setup is deliberately
+/// unverified in this milestone, so this self-check must enter a restricted
+/// state instead of claiming detection is healthy.
+fn detection_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
+    let mut detector = FailClosedTriggerDetector::new(WindowsCs2ProcessSource, false);
+    let observation = detector.observe();
+    let cause = observation
+        .snapshot
+        .first_cause()
+        .unwrap_or(TransitionCause::DetectionUnhealthy);
+    let transition = supervisor
+        .enter_competitive(cause)
+        .map_err(|error| format!("detection self-check containment failed: {error}"))?;
+    if observation.snapshot.detection_healthy || !transition.clean_shutdown {
+        return Err("detection self-check did not fail closed".to_owned());
+    }
+    let status = supervisor.status().map_err(|error| error.to_string())?;
+    println!("Jarvis trigger-detection self-check");
+    println!("cs2 trigger active: {}", observation.snapshot.cs2_running);
+    println!("detection health: {:?}", observation.health);
+    println!("profile after fail-closed evaluation: {:?}", status.profile);
+    println!("worker-start gate: {}", status.worker_start_gate_open);
+    println!("execution: no process, service, game, FACEIT component, or desktop application was modified");
+    Ok(())
 }
 
 fn config_directory() -> Result<PathBuf, String> {

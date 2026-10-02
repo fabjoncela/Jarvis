@@ -7,7 +7,90 @@ use jarvis_profiles::{
     ProfileController, RestoreError, ShutdownVerification, TransitionCause, TransitionStart,
     TransitionState,
 };
-use jarvis_windows::{WorkerLifecycle, WorkerState};
+use jarvis_windows::{
+    observe_cs2_processes, ProcessObservationError, WorkerLifecycle, WorkerState,
+};
+
+/// Read-only source for the fixed `cs2.exe` trigger. This trait keeps policy
+/// tests deterministic and prevents the gaming layer from accepting arbitrary
+/// process names or PIDs.
+pub trait Cs2ProcessSource {
+    fn cs2_is_running(&mut self) -> Result<bool, ProcessObservationError>;
+}
+
+/// The ordinary Windows implementation uses a Tool Help process snapshot with
+/// limited-query PID/creation-time verification. It does not attach to, inject
+/// into, or modify the game process.
+pub struct WindowsCs2ProcessSource;
+
+impl Cs2ProcessSource for WindowsCs2ProcessSource {
+    fn cs2_is_running(&mut self) -> Result<bool, ProcessObservationError> {
+        Ok(!observe_cs2_processes()?.is_empty())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetectionHealth {
+    Healthy,
+    FaceitSetupUnverified,
+    Cs2ObservationUnavailable,
+}
+
+/// Result of one read-only trigger snapshot. Any unhealthy result has
+/// `detection_healthy == false`, so restoration remains denied by policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TriggerObservation {
+    pub snapshot: TriggerSnapshot,
+    pub health: DetectionHealth,
+}
+
+/// Produces fail-closed snapshots. FACEIT must remain unverified until setup
+/// supplies explicit locally reviewed process and service identities; it is
+/// never guessed from a vendor-like name.
+pub struct FailClosedTriggerDetector<S> {
+    source: S,
+    faceit_setup_verified: bool,
+}
+
+impl<S> FailClosedTriggerDetector<S> {
+    #[must_use]
+    pub const fn new(source: S, faceit_setup_verified: bool) -> Self {
+        Self {
+            source,
+            faceit_setup_verified,
+        }
+    }
+}
+
+impl<S: Cs2ProcessSource> FailClosedTriggerDetector<S> {
+    pub fn observe(&mut self) -> TriggerObservation {
+        match self.source.cs2_is_running() {
+            Ok(cs2_running) if self.faceit_setup_verified => TriggerObservation {
+                snapshot: TriggerSnapshot {
+                    cs2_running,
+                    detection_healthy: true,
+                    ..TriggerSnapshot::default()
+                },
+                health: DetectionHealth::Healthy,
+            },
+            Ok(cs2_running) => TriggerObservation {
+                snapshot: TriggerSnapshot {
+                    cs2_running,
+                    detection_healthy: false,
+                    ..TriggerSnapshot::default()
+                },
+                health: DetectionHealth::FaceitSetupUnverified,
+            },
+            Err(_) => TriggerObservation {
+                snapshot: TriggerSnapshot {
+                    detection_healthy: false,
+                    ..TriggerSnapshot::default()
+                },
+                health: DetectionHealth::Cs2ObservationUnavailable,
+            },
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TriggerSnapshot {
@@ -105,7 +188,46 @@ impl CompetitiveCoordinator {
 mod tests {
     use super::*;
     use jarvis_profiles::{Profile, TransitionState};
-    use jarvis_windows::{InMemoryWorkerLifecycle, WorkerId, WorkerKind};
+    use jarvis_windows::{FixedCompetitiveProcess, InMemoryWorkerLifecycle, WorkerId, WorkerKind};
+
+    struct FixedCs2Source(Result<bool, ProcessObservationError>);
+
+    impl Cs2ProcessSource for FixedCs2Source {
+        fn cs2_is_running(&mut self) -> Result<bool, ProcessObservationError> {
+            match &self.0 {
+                Ok(running) => Ok(*running),
+                Err(_) => Err(ProcessObservationError::CandidateIdentityUnavailable {
+                    process: FixedCompetitiveProcess::Cs2,
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn unverified_faceit_setup_keeps_detection_unhealthy_even_when_cs2_is_seen() {
+        let mut detector = FailClosedTriggerDetector::new(FixedCs2Source(Ok(true)), false);
+        let observation = detector.observe();
+        assert!(observation.snapshot.cs2_running);
+        assert!(!observation.snapshot.detection_healthy);
+        assert_eq!(observation.health, DetectionHealth::FaceitSetupUnverified);
+    }
+
+    #[test]
+    fn unavailable_cs2_snapshot_fails_closed() {
+        let mut detector = FailClosedTriggerDetector::new(
+            FixedCs2Source(Err(ProcessObservationError::CandidateIdentityUnavailable {
+                process: FixedCompetitiveProcess::Cs2,
+            })),
+            true,
+        );
+        let observation = detector.observe();
+        assert!(!observation.snapshot.cs2_running);
+        assert!(!observation.snapshot.detection_healthy);
+        assert_eq!(
+            observation.health,
+            DetectionHealth::Cs2ObservationUnavailable
+        );
+    }
 
     #[test]
     fn incomplete_worker_shutdown_stays_restricted() {

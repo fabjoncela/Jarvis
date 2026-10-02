@@ -26,7 +26,24 @@ a PID. The one session worker can receive only its manager-created cooperative
 exit event; the manager observes its exact process handle, bounds cooperative
 exit, verifies Job Object emptiness after any forced fallback, and allows a
 restart only from an empty Job Object. General multi-worker lifecycle
-management, detection, and additional worker types are not implemented.
+management, resident detection, and additional worker types are not implemented.
+
+A one-shot detector can take an ordinary read-only Tool Help snapshot for the
+fixed `cs2.exe` trigger and captures PID plus creation time for every match.
+It never opens a target beyond limited query access, reads memory, injects,
+attaches a debugger, or changes a process. FACEIT's install-specific process
+and service identities are not configured or verified, so the detector is
+unhealthy by design and Competitive Mode remains fail-closed. There is no
+resident process/service subscription or startup reconciliation yet.
+
+The pre-match workflow is also deliberately singular: after a fresh user
+confirmation, a future executor may start the locally verified FACEIT client,
+open `https://www.faceit.com/` in locally verified Chrome without handling
+authentication, and launch CS2 only through Steam app 730. It is represented
+as one typed action so it cannot become three arbitrary launch APIs. There is
+currently no executor; a later implementation must re-check each local
+identity immediately before use and complete the pre-authorized handoff before
+Competitive Mode suppresses all general automation.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.

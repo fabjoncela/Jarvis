@@ -19,6 +19,9 @@ const MAX_CONFIG_FILE_BYTES: u64 = 256 * 1024;
 const LOCAL_APP_DATA_ROOT: &str = "%LOCALAPPDATA%/Jarvis/";
 const EXPECTED_DATABASE: &str = "%LOCALAPPDATA%/Jarvis/jarvis.db";
 const EXPECTED_RECIPE_DIRECTORY: &str = "%LOCALAPPDATA%/Jarvis/learned_commands";
+const FACEIT_ANTICHEAT_APPLICATION_ID: &str = "faceit_anticheat";
+const CHROME_APPLICATION_ID: &str = "chrome";
+const CS2_APPLICATION_ID: &str = "cs2";
 
 /// Configuration cannot claim that FACEIT is ready until a future detector
 /// verifies the install-specific component identities.
@@ -925,6 +928,41 @@ fn validate_applications(
         }),
         "must remain protected Steam app 730",
     );
+    require(
+        violations,
+        "applications.apps.faceit_anticheat",
+        file.apps
+            .get(FACEIT_ANTICHEAT_APPLICATION_ID)
+            .is_some_and(|application| {
+                application.kind == "configured_executable"
+                    && application.path_id.as_deref() == Some("verified_faceit_anticheat_install")
+                    && application.protected_from_cleanup == Some(true)
+            }),
+        "must remain the protected fixed FACEIT Anti-Cheat handoff identifier",
+    );
+    require(
+        violations,
+        "applications.apps.chrome",
+        file.apps
+            .get(CHROME_APPLICATION_ID)
+            .is_some_and(|application| {
+                application.kind == "configured_executable"
+                    && application.path_id.as_deref() == Some("verified_chrome_install")
+            }),
+        "must remain the fixed Chrome handoff identifier",
+    );
+    require(
+        violations,
+        "applications.apps.cs2",
+        file.apps
+            .get(CS2_APPLICATION_ID)
+            .is_some_and(|application| {
+                application.kind == "steam"
+                    && application.appid == Some(730)
+                    && application.protected_from_cleanup == Some(true)
+            }),
+        "must remain the fixed CS2 Steam handoff identifier",
+    );
     ApplicationCatalog {
         application_ids,
         protected_close_targets,
@@ -1202,10 +1240,30 @@ mod tests {
             .applications()
             .application_ids()
             .any(|identifier| identifier == "discord"));
+        assert!(configuration
+            .applications()
+            .application_ids()
+            .any(|identifier| identifier == FACEIT_ANTICHEAT_APPLICATION_ID));
         assert_eq!(
             configuration.faceit_setup_status(),
             FaceitSetupStatus::VerificationNotImplemented
         );
+    }
+
+    #[test]
+    fn pre_match_handoff_requires_the_fixed_faceit_identifier() {
+        let mut documents = fixture_documents();
+        documents.applications = documents
+            .applications
+            .replace("[apps.faceit_anticheat]", "[apps.faceit_disabled]");
+
+        let violations = violations(
+            ValidatedConfiguration::from_documents(documents)
+                .expect_err("pre-match handoff identifiers must remain fixed"),
+        );
+        assert!(violations
+            .iter()
+            .any(|violation| violation.location == "applications.apps.faceit_anticheat"));
     }
 
     #[test]

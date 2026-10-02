@@ -18,8 +18,11 @@ use std::ptr::{null, null_mut};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, FILETIME, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_NO_MORE_FILES, FILETIME, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
@@ -30,8 +33,9 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessW, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess,
-    GetProcessTimes, OpenEventW, ResumeThread, SetEvent, TerminateProcess, WaitForSingleObject,
-    CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION, STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE,
+    GetProcessTimes, OpenEventW, OpenProcess, ResumeThread, SetEvent, TerminateProcess,
+    WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE,
 };
 
 /// A Win32 call failed. Error codes are retained for local diagnostics without
@@ -72,6 +76,69 @@ impl Error for Win32Error {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixedInternalWorker {
     Session,
+}
+
+/// The only external process identity this FFI boundary observes during the
+/// current detection milestone. It cannot be used to target arbitrary apps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FixedCompetitiveProcess {
+    Cs2,
+}
+
+impl FixedCompetitiveProcess {
+    const fn executable_name(self) -> &'static str {
+        match self {
+            Self::Cs2 => "cs2.exe",
+        }
+    }
+}
+
+/// PID plus creation time from a process opened only with limited query access.
+/// This lets a later observer distinguish PID reuse without reading memory,
+/// attaching a debugger, changing priority, or modifying the target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservedProcessIdentity {
+    process_id: u32,
+    creation_time_filetime: u64,
+}
+
+impl ObservedProcessIdentity {
+    #[must_use]
+    pub const fn process_id(self) -> u32 {
+        self.process_id
+    }
+
+    #[must_use]
+    pub const fn creation_time_filetime(self) -> u64 {
+        self.creation_time_filetime
+    }
+}
+
+#[derive(Debug)]
+pub enum ProcessObservationError {
+    Win32(Win32Error),
+    CandidateIdentityUnavailable { process: FixedCompetitiveProcess },
+}
+
+impl fmt::Display for ProcessObservationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Win32(error) => error.fmt(formatter),
+            Self::CandidateIdentityUnavailable { process } => write!(
+                formatter,
+                "could not verify PID and creation-time identity for observed {process:?}"
+            ),
+        }
+    }
+}
+
+impl Error for ProcessObservationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Win32(error) => Some(error),
+            Self::CandidateIdentityUnavailable { .. } => None,
+        }
+    }
 }
 
 impl FixedInternalWorker {
@@ -528,6 +595,102 @@ impl Drop for KillOnCloseJob {
             let _ = CloseHandle(self.handle);
         }
     }
+}
+
+/// Takes a read-only Tool Help process snapshot and returns verified identities
+/// only for the fixed `cs2.exe` trigger. If a matching candidate cannot be
+/// opened with limited query access, the entire observation fails so the caller
+/// can remain restricted rather than guessing.
+pub fn observe_cs2_processes() -> Result<Vec<ObservedProcessIdentity>, ProcessObservationError> {
+    // SAFETY: TH32CS_SNAPPROCESS requests a read-only process snapshot for all
+    // processes, and process ID zero is the documented value for this flag.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(ProcessObservationError::Win32(last_error(
+            "CreateToolhelp32Snapshot",
+        )));
+    }
+
+    let result = observe_cs2_processes_in_snapshot(snapshot);
+    // SAFETY: `snapshot` is the owned handle returned by CreateToolhelp32Snapshot.
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    result
+}
+
+fn observe_cs2_processes_in_snapshot(
+    snapshot: HANDLE,
+) -> Result<Vec<ObservedProcessIdentity>, ProcessObservationError> {
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `snapshot` is a live Tool Help snapshot and `entry` has its
+    // required size field initialized with writable storage for this call.
+    let first = unsafe { Process32FirstW(snapshot, &mut entry) };
+    if first == 0 {
+        // An empty process snapshot is a valid no-match result. Any other
+        // failure is propagated so the higher-level detector can fail closed.
+        let error = last_error("Process32FirstW");
+        return if error.code() == ERROR_NO_MORE_FILES {
+            Ok(Vec::new())
+        } else {
+            Err(ProcessObservationError::Win32(error))
+        };
+    }
+
+    let mut identities = Vec::new();
+    loop {
+        if process_entry_name(&entry) == FixedCompetitiveProcess::Cs2.executable_name() {
+            identities.push(observed_process_identity(
+                FixedCompetitiveProcess::Cs2,
+                entry.th32ProcessID,
+            )?);
+        }
+
+        // SAFETY: `snapshot` remains live and `entry` is the documented
+        // in/out structure for advancing this synchronous snapshot walk.
+        let next = unsafe { Process32NextW(snapshot, &mut entry) };
+        if next != 0 {
+            continue;
+        }
+        let error = last_error("Process32NextW");
+        if error.code() == ERROR_NO_MORE_FILES {
+            return Ok(identities);
+        }
+        return Err(ProcessObservationError::Win32(error));
+    }
+}
+
+fn observed_process_identity(
+    process: FixedCompetitiveProcess,
+    process_id: u32,
+) -> Result<ObservedProcessIdentity, ProcessObservationError> {
+    // SAFETY: This requests only documented limited query access, does not
+    // inherit the handle, and neither reads nor writes target process memory.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if handle.is_null() {
+        return Err(ProcessObservationError::CandidateIdentityUnavailable { process });
+    }
+    let identity = process_identity(handle, process_id).map(|identity| ObservedProcessIdentity {
+        process_id: identity.process_id(),
+        creation_time_filetime: identity.creation_time_filetime(),
+    });
+    // SAFETY: `handle` is owned by this function and is not used after close.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    identity.map_err(ProcessObservationError::Win32)
+}
+
+fn process_entry_name(entry: &PROCESSENTRY32W) -> String {
+    let end = entry
+        .szExeFile
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(entry.szExeFile.len());
+    String::from_utf16_lossy(&entry.szExeFile[..end]).to_ascii_lowercase()
 }
 
 /// Waits for the current fixed worker's manager-created shutdown event. This

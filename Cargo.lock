@@ -31,6 +31,7 @@ dependencies = [
  "jarvis-actions",
  "jarvis-config",
  "jarvis-core",
+ "jarvis-gaming",
  "jarvis-profiles",
  "jarvis-router",
  "jarvis-windows",

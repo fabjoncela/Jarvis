@@ -10,6 +10,7 @@ use jarvis_profiles::{GateError, ProfileController};
 
 pub const ACTION_PLAN_SCHEMA_VERSION: u16 = 1;
 pub const MAX_ACTIONS_PER_PLAN: usize = 8;
+const PRE_MATCH_HANDOFF_APPLICATIONS: [&str; 3] = ["faceit_anticheat", "chrome", "cs2"];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Risk {
@@ -21,9 +22,20 @@ pub enum Risk {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
-    LaunchApplication { application_id: String },
-    CloseApplication { application_id: String },
-    SetMasterVolume { percent: u8 },
+    /// A future executor may perform only this fixed, user-confirmed sequence:
+    /// start the verified FACEIT client, open `https://www.faceit.com/` in the
+    /// verified Chrome installation without authentication, then launch CS2
+    /// through Steam app 730. It is not three general launch capabilities.
+    StartCompetitiveHandoff,
+    LaunchApplication {
+        application_id: String,
+    },
+    CloseApplication {
+        application_id: String,
+    },
+    SetMasterVolume {
+        percent: u8,
+    },
     LockScreen,
 }
 
@@ -32,6 +44,7 @@ impl Action {
     pub const fn risk(&self) -> Risk {
         match self {
             Self::LaunchApplication { .. } | Self::SetMasterVolume { .. } => Risk::Low,
+            Self::StartCompetitiveHandoff => Risk::Medium,
             Self::CloseApplication { .. } => Risk::Medium,
             Self::LockScreen => Risk::Medium,
         }
@@ -113,6 +126,15 @@ impl ActionRegistry {
 
     fn validate_action(&self, action: &Action) -> Result<(), ValidationError> {
         match action {
+            Action::StartCompetitiveHandoff => {
+                for application_id in PRE_MATCH_HANDOFF_APPLICATIONS {
+                    if !self.configured_applications.contains(application_id) {
+                        return Err(ValidationError::PreMatchHandoffUnavailable {
+                            missing_application: application_id.to_owned(),
+                        });
+                    }
+                }
+            }
             Action::LaunchApplication { application_id }
             | Action::CloseApplication { application_id } => {
                 if application_id.trim().is_empty() {
@@ -173,6 +195,7 @@ pub enum ValidationError {
     UnregisteredApplication(String),
     ProtectedCloseTarget(String),
     InvalidVolume(u8),
+    PreMatchHandoffUnavailable { missing_application: String },
 }
 
 /// The implementation boundary for future Windows effects. A real executor
@@ -257,6 +280,40 @@ mod tests {
         assert_eq!(
             result,
             Err(ValidationError::ProfileGate(GateError::StaleGeneration))
+        );
+    }
+
+    #[test]
+    fn pre_match_handoff_is_fixed_and_requires_confirmation() {
+        let registry = ActionRegistry::new(["faceit_anticheat", "chrome", "cs2"], ["cs2"]);
+        let profile = ProfileController::new();
+        let plan = registry
+            .validate(
+                ActionPlan::single(Action::StartCompetitiveHandoff),
+                request(&profile),
+                &profile,
+            )
+            .expect("the complete fixed handoff catalog should validate");
+
+        assert_eq!(plan.actions(), &[Action::StartCompetitiveHandoff]);
+        assert!(plan.requires_confirmation());
+    }
+
+    #[test]
+    fn pre_match_handoff_rejects_an_incomplete_catalog() {
+        let registry = ActionRegistry::new(["chrome", "cs2"], ["cs2"]);
+        let profile = ProfileController::new();
+        let result = registry.validate(
+            ActionPlan::single(Action::StartCompetitiveHandoff),
+            request(&profile),
+            &profile,
+        );
+
+        assert_eq!(
+            result,
+            Err(ValidationError::PreMatchHandoffUnavailable {
+                missing_application: "faceit_anticheat".to_owned(),
+            })
         );
     }
 }

@@ -5,6 +5,21 @@ appid = 730
 aliases = ["cs", "cs2", "counter", "counter strike", "counter strike 2"]
 protected_from_cleanup = true
 
+# These identifiers describe the fixed pre-match handoff only. Their actual
+# executable identities remain local runtime setup data and must be verified
+# before a future executor can use them.
+[apps.faceit_anticheat]
+type = "configured_executable"
+path_id = "verified_faceit_anticheat_install"
+aliases = []
+protected_from_cleanup = true
+
+[apps.chrome]
+type = "configured_executable"
+path_id = "verified_chrome_install"
+aliases = []
+protected_from_cleanup = true
+
 [apps.discord]
 type = "configured_executable"
 path_id = "verified_discord_install"

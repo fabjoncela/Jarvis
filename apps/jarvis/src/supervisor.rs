@@ -12,7 +12,10 @@ use std::path::Path;
 use jarvis_actions::{ActionRegistry, ValidatedPlan, ValidationError};
 use jarvis_config::{ConfigError, FaceitSetupStatus, ValidatedConfiguration};
 use jarvis_core::{ProfileGeneration, RequestContext, RequestId};
-use jarvis_profiles::{GateError, Profile, ProfileController};
+use jarvis_profiles::{
+    GateError, Profile, ProfileController, ShutdownVerification, TransitionCause, TransitionStart,
+    TransitionState,
+};
 use jarvis_router::{RouteResult, Router};
 use jarvis_windows::{
     InternalWorker, Win32Error, WindowsWorkerManager, WorkerManagerError, WorkerManifest,
@@ -29,6 +32,32 @@ pub enum SupervisorError {
 pub enum WorkerStartError {
     ProfileGate(GateError),
     Manager(WorkerManagerError),
+}
+
+#[derive(Debug)]
+pub enum CompetitiveEntryError {
+    WorkerManager(WorkerManagerError),
+}
+
+impl fmt::Display for CompetitiveEntryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkerManager(error) => {
+                write!(
+                    formatter,
+                    "competitive containment could not verify worker shutdown: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for CompetitiveEntryError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::WorkerManager(error) => Some(error),
+        }
+    }
 }
 
 impl fmt::Display for WorkerStartError {
@@ -74,12 +103,23 @@ impl Error for SupervisorError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SupervisorStatus {
     pub profile: Profile,
+    pub transition: TransitionState,
     pub generation: ProfileGeneration,
     pub action_gate_open: bool,
     pub worker_start_gate_open: bool,
     pub active_owned_worker_processes: u32,
     pub configured_internal_worker_count: usize,
     pub faceit_setup_status: FaceitSetupStatus,
+}
+
+/// Result of a serialized Competitive Mode entry. No worker shutdown outcome
+/// is considered clean until the manager has verified its owned Job Object is
+/// empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompetitiveEntryResult {
+    pub start: TransitionStart,
+    pub clean_shutdown: bool,
+    pub used_forced_termination: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -134,6 +174,7 @@ impl Supervisor {
     pub fn status(&self) -> Result<SupervisorStatus, SupervisorError> {
         Ok(SupervisorStatus {
             profile: self.controller.profile(),
+            transition: self.controller.transition(),
             generation: self.controller.generation(),
             action_gate_open: self.controller.action_gate_open(),
             worker_start_gate_open: self.controller.worker_start_gate_open(),
@@ -185,6 +226,69 @@ impl Supervisor {
     ) -> Result<WorkerShutdownReport, WorkerManagerError> {
         self.worker_manager.shutdown()
     }
+
+    /// Enters Competitive Mode by closing both profile gates before the owned
+    /// worker Job Object is asked to stop. Any manager failure is recorded as a
+    /// restricted fault, so callers cannot restore God Mode after an
+    /// unverified containment transition.
+    pub fn enter_competitive(
+        &mut self,
+        cause: TransitionCause,
+    ) -> Result<CompetitiveEntryResult, CompetitiveEntryError> {
+        let start = self.controller.enter_competitive(cause);
+        if start.was_already_restricted {
+            return match self.worker_manager.active_process_count() {
+                Ok(0) if self.controller.transition() == TransitionState::Stable => {
+                    Ok(CompetitiveEntryResult {
+                        start,
+                        clean_shutdown: true,
+                        used_forced_termination: false,
+                    })
+                }
+                Ok(active_processes) => {
+                    self.controller
+                        .finish_competitive_shutdown(ShutdownVerification::Incomplete {
+                            reason: format!(
+                                "{active_processes} owned worker process(es) remain during repeated competitive entry"
+                            ),
+                        });
+                    Ok(CompetitiveEntryResult {
+                        start,
+                        clean_shutdown: false,
+                        used_forced_termination: false,
+                    })
+                }
+                Err(error) => {
+                    self.controller
+                        .finish_competitive_shutdown(ShutdownVerification::Incomplete {
+                            reason: error.to_string(),
+                        });
+                    Err(CompetitiveEntryError::WorkerManager(
+                        WorkerManagerError::Job(error),
+                    ))
+                }
+            };
+        }
+
+        match self.worker_manager.shutdown() {
+            Ok(report) => {
+                self.controller
+                    .finish_competitive_shutdown(ShutdownVerification::Clean);
+                Ok(CompetitiveEntryResult {
+                    start,
+                    clean_shutdown: true,
+                    used_forced_termination: report.used_forced_termination,
+                })
+            }
+            Err(error) => {
+                self.controller
+                    .finish_competitive_shutdown(ShutdownVerification::Incomplete {
+                        reason: error.to_string(),
+                    });
+                Err(CompetitiveEntryError::WorkerManager(error))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +305,7 @@ mod tests {
             .expect("checked-in configuration and Job Object should initialize");
         let status = supervisor.status().expect("query empty owned Job Object");
         assert_eq!(status.profile, Profile::GodMode);
+        assert_eq!(status.transition, TransitionState::Stable);
         assert_eq!(status.active_owned_worker_processes, 0);
         assert_eq!(status.configured_internal_worker_count, 1);
     }
@@ -223,6 +328,30 @@ mod tests {
             .controller
             .enter_competitive(jarvis_profiles::TransitionCause::Manual);
 
+        assert!(matches!(
+            supervisor.start_internal_worker(InternalWorker::Session, Path::new("does-not-exist")),
+            Err(WorkerStartError::ProfileGate(GateError::ProfileRestricted))
+        ));
+    }
+
+    #[test]
+    fn competitive_entry_closes_gates_after_the_real_worker_manager_verifies_empty() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory())
+            .expect("checked-in configuration and Job Object should initialize");
+
+        let result = supervisor
+            .enter_competitive(TransitionCause::Manual)
+            .expect("empty owned Job Object should verify cleanly");
+        assert!(result.clean_shutdown);
+        assert!(!result.used_forced_termination);
+
+        let status = supervisor
+            .status()
+            .expect("query contained supervisor state");
+        assert_eq!(status.profile, Profile::Competitive);
+        assert_eq!(status.transition, TransitionState::Stable);
+        assert!(!status.action_gate_open);
+        assert!(!status.worker_start_gate_open);
         assert!(matches!(
             supervisor.start_internal_worker(InternalWorker::Session, Path::new("does-not-exist")),
             Err(WorkerStartError::ProfileGate(GateError::ProfileRestricted))

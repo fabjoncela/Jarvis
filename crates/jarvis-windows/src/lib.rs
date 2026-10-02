@@ -14,10 +14,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use jarvis_core::ProfileGeneration;
+pub use jarvis_windows_ffi::{
+    observe_cs2_processes, FixedCompetitiveProcess, ObservedProcessIdentity,
+    ProcessObservationError, Win32Error, WorkerLaunchError,
+};
 use jarvis_windows_ffi::{
     FixedInternalWorker, InternalWorkerIdentity, KillOnCloseJob, RunningInternalWorker,
 };
-pub use jarvis_windows_ffi::{Win32Error, WorkerLaunchError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerId(String);

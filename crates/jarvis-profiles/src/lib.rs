@@ -36,6 +36,7 @@ pub enum TransitionCause {
     Cs2Process,
     FaceitProcess,
     FaceitService,
+    DetectionUnhealthy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

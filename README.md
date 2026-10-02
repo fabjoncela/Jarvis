@@ -48,6 +48,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build -p jarvis-session-worker
 cargo run -p jarvis -- --self-check
 cargo run -p jarvis -- --worker-self-check
+cargo run -p jarvis -- --competitive-self-check
+cargo run -p jarvis -- --detection-self-check
 cargo run -p jarvis -- --route "Jarvis, open Discord"
 cargo run -p jarvis -- --serve-stdin
 ```
@@ -72,6 +74,21 @@ empty, and repeats the cycle to verify restart readiness. A 500 ms bound
 precedes a Job-Object-only forced-termination fallback. The command does not
 accept a user-provided executable path, PID, or command line, and it does not
 launch a configured desktop application.
+
+`--competitive-self-check` enters Competitive Mode through the real owned
+worker manager and verifies the empty Job Object before reporting closed action
+and worker-start gates. `--detection-self-check` takes one ordinary read-only
+snapshot for `cs2.exe`, keeping PID plus creation-time identity for any match.
+FACEIT setup is not yet verified, so that command must fail closed into
+Competitive Mode. Neither command starts a resident monitor or changes an
+external process or service.
+
+`Jarvis, prepare FACEIT CS2` now validates one fixed, confirmation-required
+**pre-match handoff**. A future executor may only: start the locally verified
+FACEIT client, open `https://www.faceit.com/` in the locally verified Chrome
+installation without signing in, and launch Steam app 730 (CS2). It is not an
+arbitrary app/browser/Steam command. The current build remains
+validation-only: it does not launch any of those components or log in.
 
 Runtime data will eventually live under `%LOCALAPPDATA%\Jarvis`, never in the
 repository. Model files, recordings, credentials, and live databases must not
