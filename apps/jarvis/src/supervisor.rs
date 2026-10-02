@@ -27,10 +27,11 @@ use jarvis_verification::{
     VerificationCase, VerificationError,
 };
 use jarvis_windows::{
-    observe_fixed_discord_process_count, run_pre_match_handoff, verify_fixed_discord_launcher,
-    DiscordProcessObservationError, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport,
-    PreMatchSetupError, Win32Error, WindowsWorkerManager, WorkerManagerError, WorkerManifest,
-    WorkerProcessIdentity, WorkerShutdownReport,
+    observe_fixed_discord_process_count, run_pre_match_handoff, set_default_master_volume,
+    verify_fixed_discord_launcher, AudioEndpointError, DiscordProcessObservationError,
+    InternalWorker, PreMatchHandoffError, PreMatchHandoffReport, PreMatchSetupError, Win32Error,
+    WindowsWorkerManager, WorkerManagerError, WorkerManifest, WorkerProcessIdentity,
+    WorkerShutdownReport,
 };
 
 #[derive(Debug)]
@@ -101,6 +102,25 @@ pub enum DiscordFeedbackError {
     UnknownExecution,
     Verification(VerificationError),
 }
+
+#[derive(Debug)]
+pub enum VolumeRequestError {
+    Validation(ValidationError),
+    Authorization(GateError),
+    Audio(AudioEndpointError),
+}
+
+impl fmt::Display for VolumeRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(error) => write!(formatter, "volume action rejected: {error:?}"),
+            Self::Authorization(error) => write!(formatter, "volume action denied: {error:?}"),
+            Self::Audio(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for VolumeRequestError {}
 
 struct DiscordExecution {
     reference: u128,
@@ -588,6 +608,37 @@ impl Supervisor {
         let request = RequestContext::new(RequestId::next(), self.controller.generation());
         self.authorize_discord_observation(request)?;
         observe_fixed_discord_process_count().map_err(DiscordStatusError::Observation)
+    }
+
+    /// Executes one bounded typed volume action against the default console
+    /// output endpoint. The native adapter cannot select another target.
+    pub fn set_master_volume(
+        &mut self,
+        percent: u8,
+    ) -> Result<(RequestId, f32), VolumeRequestError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.authorize_volume_request(request, percent)?;
+        let observed = set_default_master_volume(percent).map_err(VolumeRequestError::Audio)?;
+        Ok((request.request_id, observed))
+    }
+
+    fn authorize_volume_request(
+        &self,
+        request: RequestContext,
+        percent: u8,
+    ) -> Result<(), VolumeRequestError> {
+        let validated = self
+            .registry
+            .validate(
+                ActionPlan::single(Action::SetMasterVolume { percent }),
+                request,
+                &self.controller,
+            )
+            .map_err(VolumeRequestError::Validation)?;
+        debug_assert!(!validated.requires_confirmation());
+        self.controller
+            .authorize_action(request)
+            .map_err(VolumeRequestError::Authorization)
     }
 
     fn authorize_discord_observation(
@@ -1114,6 +1165,35 @@ mod tests {
         assert!(matches!(
             supervisor.discord_process_count(),
             Err(DiscordStatusError::Gate(GateError::ProfileRestricted))
+        ));
+    }
+
+    #[test]
+    fn volume_action_is_bounded_and_denied_across_profile_generation() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let old = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        assert!(supervisor.authorize_volume_request(old, 50).is_ok());
+        assert!(matches!(
+            supervisor.authorize_volume_request(old, 101),
+            Err(VolumeRequestError::Validation(
+                ValidationError::InvalidVolume(101)
+            ))
+        ));
+        supervisor
+            .controller
+            .enter_competitive(TransitionCause::Cs2Process);
+        assert!(matches!(
+            supervisor.authorize_volume_request(old, 50),
+            Err(VolumeRequestError::Validation(
+                ValidationError::ProfileGate(GateError::StaleGeneration)
+            ))
+        ));
+        let current = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        assert!(matches!(
+            supervisor.authorize_volume_request(current, 50),
+            Err(VolumeRequestError::Validation(
+                ValidationError::ProfileGate(GateError::ProfileRestricted)
+            ))
         ));
     }
 

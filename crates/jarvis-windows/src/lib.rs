@@ -23,12 +23,12 @@ use jarvis_windows_ffi::{
 };
 pub use jarvis_windows_ffi::{
     observe_competitive_activity, observe_cs2_processes, observe_fixed_discord_process_count,
-    send_supervisor_control_request, verify_default_pre_match_setup, verify_fixed_discord_launcher,
-    CompetitiveActivityObservationError, CompetitiveActivitySnapshot,
-    CompetitiveLifecycleNotifications, DiscordFeedback, DiscordProcessObservationError,
-    FixedCompetitiveProcess, LifecycleNotificationFailure, ObservedProcessIdentity,
-    PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError, PreferredApp,
-    ProcessObservationError, SupervisorControlCommand, SupervisorControlPipeError,
+    send_supervisor_control_request, set_default_master_volume, verify_default_pre_match_setup,
+    verify_fixed_discord_launcher, AudioEndpointError, CompetitiveActivityObservationError,
+    CompetitiveActivitySnapshot, CompetitiveLifecycleNotifications, DiscordFeedback,
+    DiscordProcessObservationError, FixedCompetitiveProcess, LifecycleNotificationFailure,
+    ObservedProcessIdentity, PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError,
+    PreferredApp, ProcessObservationError, SupervisorControlCommand, SupervisorControlPipeError,
     SupervisorControlPipeServer, VerifiedDiscordLauncher, VerifiedPreMatchSetup, Win32Error,
     WorkerLaunchError,
 };

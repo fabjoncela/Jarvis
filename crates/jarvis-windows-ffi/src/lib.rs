@@ -9,9 +9,11 @@
 #![allow(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod audio_endpoint;
 mod control_pipe;
 mod lifecycle_notifications;
 
+pub use audio_endpoint::{set_default_master_volume, AudioEndpointError};
 pub use control_pipe::{
     send_supervisor_control_request, DiscordFeedback, PreferredApp, SupervisorControlCommand,
     SupervisorControlPipeError, SupervisorControlPipeServer,

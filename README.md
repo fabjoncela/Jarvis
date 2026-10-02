@@ -3,7 +3,7 @@
 Jarvis is an offline-first Windows desktop assistant written primarily in Rust.
 Its current V1 foundation has no general desktop-action executor. It includes
 one user-confirmed fixed pre-match handoff for FACEIT AC, Chrome, and CS2,
-plus one fixed Discord launcher:
+plus one fixed Discord launcher and one typed master-volume action:
 
 - a profile/generation safety model, exercised through unit tests;
 - a serialized supervisor foundation with one explicit resident monitor as the
@@ -153,12 +153,20 @@ launch request, not proof that Discord finished starting. The existing
 `--route "Jarvis, open Discord"` command remains validation-only.
 
 `--execute "Jarvis, open Discord"` uses the deterministic local router, but
-accepts only its configured Discord aliases for execution. It sends the same
-fixed `OPEN_DISCORD` request to the resident owner; command text never enters
-the control pipe. All other routes—including CS2, pre-match, and volume—are
-rejected without an effect. Run this client from the exact same executable
+accepts only configured Discord aliases and `set volume to <0..100>` for
+execution. It sends only fixed typed requests to the resident owner; command
+text never enters the control pipe. All other routes—including CS2 and
+pre-match—are rejected without an effect. Run this client from the exact same executable
 path as the resident monitor; `cargo run` from a different target directory
 will fail the peer-identity check.
+
+`--set-volume <0..100>` requests a change to the current default console
+render endpoint's master volume through Windows Core Audio. The resident owner
+validates the typed action and current profile generation before the call;
+Competitive Mode denies it. A successful response includes the scalar read
+back from that endpoint. It does not prove audible output or that an external
+device did not change afterward. The command has not yet been smoke-tested on
+the live audio endpoint, and the currently running monitor predates it.
 
 `--discord-status` makes one on-demand, read-only check for signed Discord
 processes under the fixed versioned local installation. It is denied during

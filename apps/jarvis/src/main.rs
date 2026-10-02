@@ -58,6 +58,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
         [flag] if flag == "--discord-status" => return discord_status(),
+        [flag, percent] if flag == "--set-volume" => return set_volume_cli(percent),
         [flag, reference, kind] if flag == "--feedback-discord" => {
             return feedback_discord(reference, kind);
         }
@@ -95,7 +96,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --feedback-discord <reference> <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -691,6 +692,20 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 }
             }
         }
+        SupervisorControlCommand::SetMasterVolume { percent } => {
+            if !status.action_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            match supervisor.set_master_volume(percent) {
+                Ok((request, observed)) => Ok(format!(
+                    "OK MASTER_VOLUME REQUEST={request} TARGET={percent} OBSERVED_SCALAR={observed:.4}"
+                )),
+                Err(error) => {
+                    eprintln!("master volume request denied or failed: {error}");
+                    Ok("ERR MASTER_VOLUME".to_owned())
+                }
+            }
+        }
         SupervisorControlCommand::FeedbackDiscord { reference, kind } => {
             if !status.action_gate_open {
                 return Ok("ERR POLICY".to_owned());
@@ -975,6 +990,33 @@ fn feedback_discord(reference: &str, kind: &str) -> Result<(), String> {
     }
 }
 
+fn set_volume_cli(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 3
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("volume must be an integer from 0 through 100".to_owned());
+    }
+    let percent = value
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| *percent <= 100)
+        .ok_or_else(|| "volume must be an integer from 0 through 100".to_owned())?;
+    let response =
+        send_supervisor_control_request(SupervisorControlCommand::SetMasterVolume { percent })
+            .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+    if response.starts_with("OK MASTER_VOLUME REQUEST=") {
+        println!("{response}");
+        return Ok(());
+    }
+    Err(match response.as_str() {
+        "ERR POLICY" => "volume action denied by Competitive Mode policy".to_owned(),
+        "ERR MASTER_VOLUME" => "volume action failed; check monitor console".to_owned(),
+        _ => "authoritative supervisor returned an invalid volume response".to_owned(),
+    })
+}
+
 fn discord_status() -> Result<(), String> {
     let response = send_supervisor_control_request(SupervisorControlCommand::DiscordStatus)
         .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
@@ -1025,6 +1067,12 @@ fn executable_route(
         {
             Ok(SupervisorControlCommand::OpenDiscord)
         }
+        RouteResult::Plan(plan) if matches!(plan.actions.as_slice(), [Action::SetMasterVolume { .. }]) => {
+            let [Action::SetMasterVolume { percent }] = plan.actions.as_slice() else {
+                unreachable!("guard ensures one volume action")
+            };
+            Ok(SupervisorControlCommand::SetMasterVolume { percent: *percent })
+        }
         RouteResult::Plan(_) => Err("this routed action has no execution adapter; use --prepare-faceit-cs2 for the confirmed pre-match handoff".to_owned()),
         RouteResult::InvalidPattern { reason } => Err(format!("invalid command: {reason}")),
         RouteResult::Unknown => Err("unknown command; nothing was executed".to_owned()),
@@ -1034,6 +1082,9 @@ fn executable_route(
 fn execute_text_command(utterance: &str, configuration_directory: &Path) -> Result<(), String> {
     match executable_route(utterance, configuration_directory)? {
         SupervisorControlCommand::OpenDiscord => open_discord(),
+        SupervisorControlCommand::SetMasterVolume { percent } => {
+            set_volume_cli(&percent.to_string())
+        }
         _ => Err("unsupported execution route".to_owned()),
     }
 }
@@ -1592,10 +1643,14 @@ mod tests {
                 Ok(SupervisorControlCommand::OpenDiscord)
             );
         }
+        assert_eq!(
+            executable_route("set volume to 50", &configuration),
+            Ok(SupervisorControlCommand::SetMasterVolume { percent: 50 })
+        );
         for utterance in [
             "open cs2",
             "prepare faceit cs2",
-            "set volume to 50",
+            "set volume to 101",
             "open chrome",
             "run powershell",
             "",

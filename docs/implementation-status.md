@@ -124,6 +124,14 @@ pre-match launch sequence, not a running desktop assistant:
     identical retries are idempotent. Competitive entry cancels pending
     verification. User feedback cannot produce a machine-verified outcome or
     persist experience for learning.
+21. `--set-volume <0..100>` and deterministic `--execute "set volume to N"`
+    requests now map to one bounded `SetMasterVolume` IPC command. The resident
+    owner validates the typed action and current profile generation, then the
+    narrow Core Audio adapter changes only the default console render
+    endpoint and reads back its scalar. No arbitrary endpoint or COM object is
+    request-selectable. Tests cover malformed protocol, out-of-range values,
+    and Competitive/stale-generation denial. The native audio call has not
+    yet been live-smoke-tested; the running monitor is an older binary.
 
 ## Explicitly not implemented
 
@@ -135,9 +143,10 @@ pre-match launch sequence, not a running desktop assistant:
   authoritative 500 ms identity-snapshot fallback unless access is later
   deliberately changed. This is not a reason to elevate or weaken permissions
   automatically.
-- general desktop application, audio, browser, file, service, or system action
+- general desktop application, browser, file, service, or system action
   execution; only the fixed confirmation-gated pre-match sequence and the
-  fixed Discord command can currently launch user applications
+  fixed Discord command can currently launch user applications, while the
+  one bounded volume action affects the default output endpoint
 - general-purpose memory/feedback commands or a learning pipeline, general-purpose IPC, tray
   UI, microphone, STT, TTS, Qwen, or learning workers
 

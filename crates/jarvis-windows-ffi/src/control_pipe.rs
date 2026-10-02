@@ -99,6 +99,9 @@ pub enum SupervisorControlCommand {
     LastHandoff,
     OpenDiscord,
     DiscordStatus,
+    SetMasterVolume {
+        percent: u8,
+    },
     FeedbackDiscord {
         reference: u128,
         kind: DiscordFeedback,
@@ -132,6 +135,8 @@ impl SupervisorControlCommand {
             Self::LastHandoff => b"JARVIS/1 LAST_HANDOFF".to_vec(),
             Self::OpenDiscord => b"JARVIS/1 OPEN_DISCORD".to_vec(),
             Self::DiscordStatus => b"JARVIS/1 DISCORD_STATUS".to_vec(),
+            Self::SetMasterVolume { percent } =>
+                format!("JARVIS/1 SET_MASTER_VOLUME {percent}").into_bytes(),
             Self::FeedbackDiscord { reference, kind } =>
                 format!("{FEEDBACK_DISCORD_PREFIX}{reference:032x} {}", kind.wire()).into_bytes(),
             Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2".to_vec(),
@@ -169,6 +174,17 @@ impl SupervisorControlCommand {
             b"JARVIS/1 PREFERRED_APP_STATE" => Some(Self::PreferredAppState),
             _ => {
                 let text = std::str::from_utf8(bytes).ok()?;
+                if let Some(value) = text.strip_prefix("JARVIS/1 SET_MASTER_VOLUME ") {
+                    if value.is_empty()
+                        || value.len() > 3
+                        || (value.len() > 1 && value.starts_with('0'))
+                        || !value.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        return None;
+                    }
+                    let percent = value.parse::<u8>().ok()?;
+                    return (percent <= 100).then_some(Self::SetMasterVolume { percent });
+                }
                 if let Some(fields) = text.strip_prefix(FEEDBACK_DISCORD_PREFIX) {
                     let mut parts = fields.split(' ');
                     let reference = parse_event_id(parts.next()?)?;
@@ -757,6 +773,21 @@ mod tests {
 
     #[test]
     fn wire_parser_rejects_arbitrary_payloads() {
+        for percent in [0, 1, 50, 100] {
+            let command = SupervisorControlCommand::SetMasterVolume { percent };
+            assert_eq!(
+                SupervisorControlCommand::parse(&command.wire()),
+                Some(command)
+            );
+        }
+        for invalid in [
+            b"JARVIS/1 SET_MASTER_VOLUME 101".as_slice(),
+            b"JARVIS/1 SET_MASTER_VOLUME 01".as_slice(),
+            b"JARVIS/1 SET_MASTER_VOLUME -1".as_slice(),
+            b"JARVIS/1 SET_MASTER_VOLUME 50 EXTRA".as_slice(),
+        ] {
+            assert_eq!(SupervisorControlCommand::parse(invalid), None);
+        }
         for kind in [DiscordFeedback::Worked, DiscordFeedback::Failed] {
             let command = SupervisorControlCommand::FeedbackDiscord {
                 reference: 0x1234,
