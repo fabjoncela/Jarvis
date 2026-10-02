@@ -44,6 +44,9 @@ architecture specification is maintained at
 small, testable milestones.
 The [future architecture compatibility plan](docs/future-architecture-compatibility.md)
 records proposed post-current-version upgrades without enabling them.
+The [V1 Qwen preflight](docs/qwen-v1-preflight.md) records the observed local
+model and the worker/benchmark gates for the planned single- or dual-tier
+integration; it does not load a model.
 
 ## Prerequisites
 

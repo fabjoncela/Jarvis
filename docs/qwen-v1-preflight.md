@@ -1,0 +1,60 @@
+# V1 local Qwen preflight
+
+Status: inventory and implementation gate, not an active model integration.
+Observed on this Windows workstation on 3 October 2026; recheck before use.
+
+## Existing local assets
+
+- Ollama 0.32.5 is installed, but it was not running before this inventory.
+  Invoking its CLI started the app/server; those inventory-started processes
+  were stopped afterward. Jarvis must not silently depend on a persistent
+  Ollama daemon, especially across Competitive Mode entry.
+- `ollama list` showed one model: `qwen3.6:27b`, approximately 17 GB. Its model
+  layer is a 17,420,420,832-byte GGUF v3 blob under the existing Ollama model
+  store. Do not copy or redownload it merely to test a runtime.
+- `nvidia-smi` reported an RTX 5070 with 12,227 MiB total VRAM; one snapshot
+  showed 10,622 MiB free. The 27B blob cannot be assumed to reside fully in
+  VRAM, and a snapshot is not a performance measurement.
+- No smaller Ollama model or standalone `llama-cli` / `llama-server` executable
+  was found in the inspected installation. Ollama bundles native llama/ggml
+  libraries, but that is not yet a stable Jarvis worker contract.
+
+## First implementation slice
+
+1. Choose and pin a supported local inference runtime and exact model
+   manifest: revision, quantization, license, digest, context cap, and memory
+   budget. Reuse the GGUF blob only after the runtime can load it reliably;
+   do not bind Jarvis to an internal, undocumented Ollama DLL ABI.
+2. Start one fixed Jarvis-owned model worker on demand in the supervisor's
+   containment job. It receives a bounded typed planning request and returns
+   only a schema-valid proposal. The worker never receives raw executable
+   paths, shell authority, or a profile/policy mutation capability.
+3. Recheck profile generation and all typed action permissions in the Rust
+   supervisor after the model response and again before each side effect.
+   Reject stale, malformed, partial, oversized, or uncertain plans. A
+   permission denial cannot be retried by asking a stronger model.
+4. Shut down the model worker and its children at Competitive entry, deny
+   restart there, and keep the model unloaded after God Mode restoration until
+   a fresh unknown request needs it.
+5. Benchmark the single-model path first. Then evaluate an optional small
+   fast-tier Qwen for bounded classification/tool selection versus the main
+   installed model for harder planning. Choose the split only if held-out
+   action/argument accuracy and end-to-end latency improve within RAM/VRAM
+   limits. Do not keep both tiers resident by default.
+
+## Acceptance evidence before user-facing AI execution
+
+- Fixed worker start/stop, crash, timeout, and child-process containment tests.
+- Competitive-entry race tests while loading, generating, and returning a
+  proposal; stale responses must never execute.
+- Held-out prompts for known-command bypass, valid typed plans, wrong targets,
+  out-of-scope actions, malformed JSON, prompt injection, and permission
+  denial. Compare single-model and dual-tier candidates on the same cases.
+- Cold/warm latency, CPU/RAM/VRAM, and power/performance observations on this
+  PC, without launching or interacting with a game for artificial scores.
+- No cloud fallback, automatic model download, persistent server, or default
+  transcript retention.
+
+The current Jarvis checkout has none of this inference worker yet. The
+existing deterministic commands and fixed launch paths remain the only
+runtime execution paths.
