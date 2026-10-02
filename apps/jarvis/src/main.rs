@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-//! Non-executing CLI for the Jarvis supervisor foundation.
+//! Desktop-action-free CLI for the Jarvis supervisor foundation.
 //!
 //! `--serve-stdin` keeps one serialized supervisor alive for explicitly typed
-//! status and route requests. It intentionally starts no process monitor,
-//! worker, or action executor.
+//! status and route requests. It intentionally starts no process monitor or
+//! action executor; `--worker-self-check` is the sole fixed-worker start.
 
 mod supervisor;
 
@@ -13,6 +13,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use jarvis_windows::InternalWorker;
 use supervisor::{RouteOutcome, Supervisor};
 
 const MAX_CONSOLE_COMMAND_BYTES: usize = 4 * 1024;
@@ -35,7 +36,11 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--self-check" => self_check(&supervisor),
         [flag, command] if flag == "--route" => route(command, &mut supervisor),
         [flag] if flag == "--serve-stdin" => serve_stdin(&mut supervisor),
-        _ => Err("usage: jarvis [--self-check | --route <command> | --serve-stdin]".to_owned()),
+        [flag] if flag == "--worker-self-check" => worker_self_check(&mut supervisor),
+        _ => Err(
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check]"
+                .to_owned(),
+        ),
     }
 }
 
@@ -57,7 +62,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "worker launch, Job assignment, and containment: not implemented"
+        "fixed-worker containment: available only through --worker-self-check; general lifecycle: not implemented"
     )
     .map_err(io_error)?;
     writeln!(output, "supervisor policy state: {:?}", status.profile).map_err(io_error)?;
@@ -77,7 +82,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "fixed internal worker manifest: {} entry; launch disabled",
+        "fixed internal worker manifest: {} entry; start available only through --worker-self-check",
         status.configured_internal_worker_count
     )
     .map_err(io_error)?;
@@ -89,7 +94,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "execution: disabled; no configured desktop action, application launch, or worker launch was performed"
+        "execution: desktop actions remain disabled; no configured application launch was performed"
     )
     .map_err(io_error)?;
     Ok(())
@@ -190,6 +195,28 @@ fn serve<R: BufRead, W: Write>(
 
 fn io_error(error: io::Error) -> String {
     format!("console I/O failed: {error}")
+}
+
+/// Deliberately starts only the checked-in session worker from beside the
+/// current executable. This is a containment self-check, not a general worker
+/// launch command or a desktop action.
+fn worker_self_check(supervisor: &mut Supervisor) -> Result<(), String> {
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let installation_directory = executable.parent().ok_or_else(|| {
+        "could not determine the current executable's installation directory".to_owned()
+    })?;
+    let identity = supervisor
+        .start_internal_worker(InternalWorker::Session, installation_directory)
+        .map_err(|error| format!("worker self-check failed: {error}"))?;
+    println!("Jarvis owned-worker containment self-check");
+    println!("worker: {:?}", identity.worker());
+    println!("process id: {}", identity.process_id());
+    println!("creation identity: {}", identity.creation_time_filetime());
+    println!(
+        "sequence: created suspended, assigned to the owned Job Object, membership verified, then resumed"
+    );
+    println!("execution: no configured desktop action or user application was launched");
+    Ok(())
 }
 
 fn config_directory() -> Result<PathBuf, String> {

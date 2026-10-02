@@ -3,12 +3,19 @@
 //! Windows integration boundary.
 //!
 //! The in-memory lifecycle adapter supports deterministic policy tests. The
-//! `WindowsOwnedWorkerJob` is an opaque Job Object that a future serialized
-//! supervisor can own, but it deliberately cannot launch or adopt any process.
+//! `WindowsWorkerManager` owns an opaque Job Object and can start only a
+//! fixed-manifest internal worker through the suspended-create, assign, verify,
+//! resume sequence. It cannot adopt a PID or launch an arbitrary executable.
+
+use std::error::Error;
+use std::fmt;
+use std::path::Path;
 
 use jarvis_core::ProfileGeneration;
-use jarvis_windows_ffi::KillOnCloseJob;
-pub use jarvis_windows_ffi::Win32Error;
+use jarvis_windows_ffi::{
+    FixedInternalWorker, InternalWorkerIdentity, KillOnCloseJob, RunningInternalWorker,
+};
+pub use jarvis_windows_ffi::{Win32Error, WorkerLaunchError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerId(String);
@@ -188,14 +195,11 @@ impl WorkerLifecycle for InMemoryWorkerLifecycle {
     }
 }
 
-/// An opaque Job Object owned by the future serialized Jarvis supervisor.
+/// An opaque Job Object owned by the serialized Jarvis supervisor.
 ///
-/// The unnamed Job Object and its raw handle remain opaque. This type does not
-/// track workers, participate in a competitive transition, or expose
-/// process-launch/assignment APIs. A future worker manager must implement the
-/// fixed suspended-create, assign, verify, resume sequence before a manifest
-/// worker is allowed to run.
-#[derive(Debug)]
+/// The unnamed Job Object and its raw handle remain opaque. Only
+/// `WindowsWorkerManager` can use it to start a fixed internal worker; no
+/// public PID or executable-path assignment API exists.
 pub struct WindowsOwnedWorkerJob {
     job: KillOnCloseJob,
 }
@@ -209,6 +213,138 @@ impl WindowsOwnedWorkerJob {
 
     pub fn active_process_count(&self) -> Result<u32, Win32Error> {
         self.job.active_process_count()
+    }
+
+    fn start_fixed_worker(
+        &self,
+        worker: InternalWorker,
+        installation_directory: &Path,
+    ) -> Result<RunningInternalWorker, WorkerLaunchError> {
+        let worker = match worker {
+            InternalWorker::Session => FixedInternalWorker::Session,
+        };
+        let suspended = self
+            .job
+            .create_suspended_fixed_worker(worker, installation_directory)?;
+        self.job.assign_and_verify(&suspended)?;
+        suspended.resume()
+    }
+}
+
+/// Recorded identity for a running fixed-manifest worker. It is captured from
+/// the process handle while suspended, before the worker can run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerProcessIdentity {
+    worker: InternalWorker,
+    process_id: u32,
+    creation_time_filetime: u64,
+}
+
+impl WorkerProcessIdentity {
+    #[must_use]
+    pub const fn worker(self) -> InternalWorker {
+        self.worker
+    }
+
+    #[must_use]
+    pub const fn process_id(self) -> u32 {
+        self.process_id
+    }
+
+    #[must_use]
+    pub const fn creation_time_filetime(self) -> u64 {
+        self.creation_time_filetime
+    }
+}
+
+#[derive(Debug)]
+pub enum WorkerManagerError {
+    AlreadyRunning(InternalWorker),
+    Launch(WorkerLaunchError),
+    Job(Win32Error),
+}
+
+impl fmt::Display for WorkerManagerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyRunning(worker) => {
+                write!(formatter, "{worker:?} worker is already running")
+            }
+            Self::Launch(error) => error.fmt(formatter),
+            Self::Job(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for WorkerManagerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::AlreadyRunning(_) => None,
+            Self::Launch(error) => Some(error),
+            Self::Job(error) => Some(error),
+        }
+    }
+}
+
+struct ManagedWorker {
+    identity: WorkerProcessIdentity,
+    _process: RunningInternalWorker,
+}
+
+/// Trusted manager for the fixed internal-worker manifest. It intentionally
+/// has no method that accepts a user PID, executable path, command line, or
+/// inherited handle list.
+pub struct WindowsWorkerManager {
+    job: WindowsOwnedWorkerJob,
+    workers: Vec<ManagedWorker>,
+}
+
+impl WindowsWorkerManager {
+    pub fn create() -> Result<Self, Win32Error> {
+        Ok(Self {
+            job: WindowsOwnedWorkerJob::create()?,
+            workers: Vec::new(),
+        })
+    }
+
+    pub fn active_process_count(&self) -> Result<u32, Win32Error> {
+        self.job.active_process_count()
+    }
+
+    pub fn start(
+        &mut self,
+        worker: InternalWorker,
+        installation_directory: &Path,
+    ) -> Result<WorkerProcessIdentity, WorkerManagerError> {
+        if self
+            .workers
+            .iter()
+            .any(|managed| managed.identity.worker() == worker)
+        {
+            return Err(WorkerManagerError::AlreadyRunning(worker));
+        }
+
+        let process = self
+            .job
+            .start_fixed_worker(worker, installation_directory)
+            .map_err(WorkerManagerError::Launch)?;
+        let identity = worker_identity(worker, process.identity());
+        self.workers.push(ManagedWorker {
+            identity,
+            _process: process,
+        });
+        Ok(identity)
+    }
+}
+
+fn worker_identity(
+    worker: InternalWorker,
+    identity: InternalWorkerIdentity,
+) -> WorkerProcessIdentity {
+    WorkerProcessIdentity {
+        worker,
+        process_id: identity.process_id(),
+        creation_time_filetime: identity.creation_time_filetime(),
     }
 }
 
@@ -240,6 +376,12 @@ mod tests {
     fn manifest_allows_only_the_checked_in_session_worker() {
         let manifest = WorkerManifest;
         assert_eq!(manifest.all().len(), 1);
+        assert_eq!(
+            manifest
+                .specification(InternalWorker::Session)
+                .executable_name(),
+            FixedInternalWorker::Session.executable_name()
+        );
         assert_eq!(
             manifest.specification(InternalWorker::Session),
             WorkerSpec {

@@ -17,11 +17,13 @@ The current implementation validates the complete source-controlled
 configuration bundle before it constructs the router or registry. The current
 executable is validation-only: it creates a serialized `Supervisor` for one
 CLI invocation, or keeps one alive through the explicit `--serve-stdin` loop.
-It has no Windows service, process monitor, or worker. That supervisor owns an
-empty opaque reviewed Win32 Job Object and a fixed manifest for the checked-in
-session worker. Worker launch is not implemented; the planned worker manager
-must use the suspended-create, assign, verify, resume sequence before a
-manifest worker can run.
+It has no Windows service or process monitor. That supervisor owns an opaque
+reviewed Win32 Job Object and a fixed manifest for the checked-in session
+worker. Its explicit containment self-check is the only implemented worker
+start: it creates that manifest worker suspended, assigns and verifies its Job
+Object membership, then resumes it. The check accepts neither a user path nor
+a PID. General worker lifecycle management, detection, and additional worker
+types are not implemented.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.

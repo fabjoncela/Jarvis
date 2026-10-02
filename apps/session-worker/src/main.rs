@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 //! Placeholder for the future God Mode session worker.
-//! It is never started by the current supervisor.
+//! It is started only by the fixed-worker containment self-check today.
 
 use jarvis_core::{RequestContext, RequestId};
 use jarvis_profiles::ProfileController;

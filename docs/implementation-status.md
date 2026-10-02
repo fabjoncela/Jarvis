@@ -2,7 +2,7 @@
 
 ## Implemented foundation
 
-The workspace currently provides a non-executing validation slice, not a
+The workspace currently provides a desktop-action-free validation slice, not a
 running desktop assistant:
 
 1. `jarvis-core` creates request IDs, profile generations, and cancellation
@@ -23,18 +23,19 @@ running desktop assistant:
 6. `jarvis-router` performs conservative normalization, config-derived exact
    aliases, and a bounded `set volume to <0..100>` pattern.
 7. `jarvis-windows-ffi` owns the only reviewed raw Win32 calls. It creates an
-   unnamed Job Object with `KILL_ON_JOB_CLOSE`, can query its active process
-   count, and can terminate only members that future trusted startup assigns.
+   unnamed Job Object with `KILL_ON_JOB_CLOSE`, and can start only the fixed
+   session-worker enum entry under an installation directory: create suspended,
+   assign to the Job Object, verify membership, then resume.
 8. `jarvis-windows` retains the in-memory adapter for policy tests, owns the
-   fixed one-entry internal-worker manifest, and adds an opaque empty Job
-   Object. It deliberately exposes no API to open, adopt, or launch a user
-   process.
+   fixed one-entry internal-worker manifest, and provides an opaque worker
+   manager. It exposes no API to open or adopt a PID, or launch a user-supplied
+   executable.
 9. `jarvis-gaming` models competitive transitions against testable in-memory
    lifecycle boundaries; it is not wired to a live detector or runtime.
 
 ## Explicitly not implemented
 
-- trusted suspended worker creation, Job Object assignment, or worker IPC
+- worker IPC, exit observation/restart, or a general worker lifecycle
 - a Windows service, Windows process/service event subscriptions, or FACEIT
   identity verification
 - actual application, audio, browser, file, service, or system actions
@@ -43,8 +44,7 @@ running desktop assistant:
 
 ## Next milestone
 
-Implement a long-lived serialized supervisor and a fixed internal worker
-manifest. It must create every worker suspended, assign and verify it in its
-own Job Object, then resume it. Add ordinary process/service lifecycle
-observation and verify Competitive Mode containment before introducing a
-single action executor or AI/voice worker.
+Add exit observation, bounded cooperative shutdown, verified Job Object
+emptiness, and safe restart behavior to the fixed internal-worker manager. Add
+ordinary process/service lifecycle observation and verify Competitive Mode
+containment before introducing a single action executor or AI/voice worker.
