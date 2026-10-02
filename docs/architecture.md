@@ -80,6 +80,11 @@ resident owner, then starts only the fixed signed launcher under Local AppData.
 It cannot accept a path or arguments. A successful CreateProcess return is
 reported as dispatch, not verified application readiness. It is never
 available while Competitive Mode closes the action gate.
+The `--execute <text>` CLI reuses the conservative local router, but converts
+only configured Discord aliases to that same fixed pipe command. It cannot
+send arbitrary text or a new executable path to the owner. Other routed plans
+remain previews or use their separate explicit workflow; `--route` is still
+validation-only.
 
 The native setup check is read-only: it accepts only FACEIT's fixed
 Anti-Cheat Launcher/service locations under Program Files, verifies their Windows trust,

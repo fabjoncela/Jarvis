@@ -107,6 +107,11 @@ pre-match launch sequence, not a running desktop assistant:
     tombstone. Neither command launches an app or changes routing.
     An existing v1 database must receive a verified SQLite-consistent backup
     before the v2 migration; failure or a pre-existing backup blocks upgrade.
+18. `--execute <text>` is an opt-in text entry point for configured Discord
+    aliases only. The client router maps them to the existing fixed
+    `OPEN_DISCORD` pipe command; all other plans and unknown text are rejected
+    before IPC. The resident owner still validates its typed action, profile,
+    and generation. `--route` remains validation-only.
 
 ## Explicitly not implemented
 
@@ -155,7 +160,7 @@ authoritative, and do not add a general executable- or PID-based API.
 
 The resident monitor was updated while detection was healthy and CS2, the
 verified FACEIT launcher, and `FACEITService` were inactive. It now runs from
-`target\next-discord-action\debug\jarvis.exe` as an explicit hidden process, not
+`target\next-text-action\debug\jarvis.exe` as an explicit hidden process, not
 an installed service or automatic-start application. Status and preferred-app
 read/empty-clear/canceled-save commands were exercised through its fixed pipe.
 The read created an empty `%LOCALAPPDATA%\Jarvis\jarvis.db`; no preference was
@@ -224,6 +229,12 @@ This is evidence that Discord started, but the current command still does not
 verify a ready window or login. The unit tests deny the action in Competitive
 Mode and reject an old request generation after profile restoration. No
 FACEIT, Chrome, Steam, or CS2 process was launched or closed for this test.
+
+The new text entry point was smoke-tested with `--execute "Jarvis, open
+Discord"`; it returned the fixed Discord launch receipt and the resident
+monitor stayed in healthy God Mode. Separate `open cs2`, `prepare faceit cs2`,
+and unknown-command attempts exited without launch. The older `--route`
+command remains preview-only.
 
 ## One-time Chrome FACEIT title check
 

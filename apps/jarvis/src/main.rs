@@ -17,6 +17,9 @@ use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use jarvis_actions::Action;
+use jarvis_config::ValidatedConfiguration;
+use jarvis_router::{RouteResult, Router};
 use jarvis_storage::{EventId, PreferenceKey, ReferenceId};
 
 use jarvis_gaming::{
@@ -32,6 +35,7 @@ use jarvis_windows::{
 use supervisor::{ActivityReconciliation, RouteOutcome, Supervisor};
 
 const MAX_CONSOLE_COMMAND_BYTES: usize = 4 * 1024;
+const MAX_EXECUTE_COMMAND_BYTES: usize = 256;
 const COMPETITIVE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CONTROL_EVENT_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -52,6 +56,9 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
+        [flag, command] if flag == "--execute" => {
+            return execute_text_command(command, configuration_directory);
+        }
         [flag] if flag == "--show-preferred-app" => return show_preferred_app(),
         [flag] if flag == "--clear-preferred-app" => return clear_preferred_app(),
         [flag, app] if flag == "--remember-preferred-app" => {
@@ -83,7 +90,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -894,6 +901,41 @@ fn open_discord() -> Result<(), String> {
     Ok(())
 }
 
+/// Converts conservative local routing into one closed, typed resident
+/// request. The text itself never crosses the control pipe. The resident
+/// owner independently validates the action and current profile generation.
+fn executable_route(
+    utterance: &str,
+    configuration_directory: &Path,
+) -> Result<SupervisorControlCommand, String> {
+    if utterance.is_empty() || utterance.len() > MAX_EXECUTE_COMMAND_BYTES {
+        return Err("text command must contain 1 to 256 UTF-8 bytes".to_owned());
+    }
+    let configuration = ValidatedConfiguration::load_from_dir(configuration_directory)
+        .map_err(|error| format!("configuration rejected: {error}"))?;
+    let router = Router::from_catalog(configuration.applications());
+    match router.route(utterance) {
+        RouteResult::Plan(plan)
+            if matches!(
+                plan.actions.as_slice(),
+                [Action::LaunchApplication { application_id }] if application_id == "discord"
+            ) =>
+        {
+            Ok(SupervisorControlCommand::OpenDiscord)
+        }
+        RouteResult::Plan(_) => Err("this routed action has no execution adapter; use --prepare-faceit-cs2 for the confirmed pre-match handoff".to_owned()),
+        RouteResult::InvalidPattern { reason } => Err(format!("invalid command: {reason}")),
+        RouteResult::Unknown => Err("unknown command; nothing was executed".to_owned()),
+    }
+}
+
+fn execute_text_command(utterance: &str, configuration_directory: &Path) -> Result<(), String> {
+    match executable_route(utterance, configuration_directory)? {
+        SupervisorControlCommand::OpenDiscord => open_discord(),
+        _ => Err("unsupported execution route".to_owned()),
+    }
+}
+
 fn show_preferred_app() -> Result<(), String> {
     let response = send_supervisor_control_request(SupervisorControlCommand::ShowPreferredApp)
         .map_err(|error| format!("resident supervisor unavailable: {error}"))?;
@@ -1436,6 +1478,30 @@ mod tests {
                 &test_config_directory(),
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn text_execution_maps_only_configured_discord_aliases_to_fixed_pipe_command() {
+        let configuration = test_config_directory();
+        for utterance in ["Jarvis, open Discord", "open dc", "  OPEN   DISCORD  "] {
+            assert_eq!(
+                executable_route(utterance, &configuration),
+                Ok(SupervisorControlCommand::OpenDiscord)
+            );
+        }
+        for utterance in [
+            "open cs2",
+            "prepare faceit cs2",
+            "set volume to 50",
+            "open chrome",
+            "run powershell",
+            "",
+        ] {
+            assert!(executable_route(utterance, &configuration).is_err());
+        }
+        assert!(
+            executable_route(&"x".repeat(MAX_EXECUTE_COMMAND_BYTES + 1), &configuration).is_err()
         );
     }
 

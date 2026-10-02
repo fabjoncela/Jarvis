@@ -149,6 +149,14 @@ It is denied when Competitive Mode closes the action gate. The result is a
 launch request, not proof that Discord finished starting. The existing
 `--route "Jarvis, open Discord"` command remains validation-only.
 
+`--execute "Jarvis, open Discord"` uses the deterministic local router, but
+accepts only its configured Discord aliases for execution. It sends the same
+fixed `OPEN_DISCORD` request to the resident owner; command text never enters
+the control pipe. All other routes—including CS2, pre-match, and volume—are
+rejected without an effect. Run this client from the exact same executable
+path as the resident monitor; `cargo run` from a different target directory
+will fail the peer-identity check.
+
 `--pre-match-setup-self-check` verifies that exact local handoff setup without
 starting anything: fixed Program Files locations, valid Windows Authenticode
 trust for the FACEIT Anti-Cheat Launcher/Service, Chrome, and Steam binaries,
