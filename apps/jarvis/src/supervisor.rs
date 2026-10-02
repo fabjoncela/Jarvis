@@ -274,8 +274,8 @@ impl Supervisor {
 
     /// Appends an explicit typed preference. Store opening and migration work
     /// happen only after both God Mode gates are open; the per-call connection
-    /// is dropped before returning and is never owned by a worker. There is no
-    /// caller must obtain explicit consent before invoking this API.
+    /// is dropped before returning and is never owned by a worker. The caller
+    /// must obtain explicit consent before invoking this API.
     pub fn record_explicit_preference(
         &self,
         expected_generation: u64,
@@ -656,6 +656,42 @@ mod tests {
         let mut opened = false;
         let result: Result<(), PersistentMemoryError> = supervisor.with_persistent_store(
             supervisor.controller.generation().value() + 1,
+            || {
+                opened = true;
+                Store::open_in_test_root(&root.0)
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(
+            result,
+            Err(PersistentMemoryError::StaleGeneration)
+        ));
+        assert!(!opened);
+        assert!(!root.0.join("jarvis.db").exists());
+    }
+
+    #[test]
+    fn preference_from_before_competitive_entry_cannot_replay_after_restoration() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let prior_generation = supervisor.controller.generation().value();
+        let start = Instant::now();
+        supervisor
+            .reconcile_activity_at(observation(true, true), start)
+            .expect("trigger should close the gates");
+        assert_eq!(supervisor.controller.profile(), Profile::Competitive);
+        supervisor
+            .reconcile_activity_at(observation(false, true), start + Duration::from_secs(1))
+            .expect("healthy clear begins the cooldown");
+        supervisor
+            .reconcile_activity_at(observation(false, true), start + Duration::from_secs(10))
+            .expect("healthy clear after cooldown restores God Mode");
+        assert_eq!(supervisor.controller.profile(), Profile::GodMode);
+        assert!(supervisor.controller.generation().value() > prior_generation);
+
+        let root = StorageTestRoot::new();
+        let mut opened = false;
+        let result: Result<(), PersistentMemoryError> = supervisor.with_persistent_store(
+            prior_generation,
             || {
                 opened = true;
                 Store::open_in_test_root(&root.0)

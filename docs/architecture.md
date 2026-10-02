@@ -96,6 +96,20 @@ informational only, and does not affect routing or launch decisions. There is
 no general memory command or learning pipeline. Tests use isolated
 temporary roots rather than the production path.
 
+The storage adapter now also has a staged, revision-bound preference tombstone
+operation. It preserves an audit record rather than claiming physical erasure;
+ordinary saves cannot replay across a forget boundary, and restoration needs
+the exact current tombstone event ID. This is not exposed as a user command
+until the full inspect/forget/restore flow is designed. A v1 database receives
+a verified SQLite-consistent backup at a fixed sibling path before migration
+to v2; an existing backup or failed backup blocks that upgrade.
+
+`jarvis-session-context` is a RAM-only contract for a future God Mode session
+worker. It holds bounded opaque execution/target identities, clears on profile
+generation advance, and fails closed on ambiguous or stale references. It
+does not store transcripts or authorize actions, and is not wired into the
+placeholder worker yet.
+
 `jarvis-verification` separately models dispatch, exact execution-anchored
 feedback, and trusted machine observations. Dispatch or positive feedback
 alone cannot produce a verified machine outcome. Its native observation

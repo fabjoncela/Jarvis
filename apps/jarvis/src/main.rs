@@ -821,9 +821,7 @@ fn remember_preferred_app(app: &str) -> Result<(), String> {
     println!("Save {} as your preferred app? This is informational and will not change launches or routing.", app.application_id());
     print!("Type SAVE to continue, or press Enter to cancel: ");
     io::stdout().flush().map_err(io_error)?;
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer).map_err(io_error)?;
-    if answer.trim_end_matches(['\r', '\n']) != "SAVE" {
+    if !read_save_confirmation(&mut io::stdin().lock())? {
         println!("Cancelled; no preference was written.");
         return Ok(());
     }
@@ -863,21 +861,54 @@ fn remember_preferred_app(app: &str) -> Result<(), String> {
 }
 
 fn admitted_memory_generation(status: &str) -> Result<u64, String> {
-    if !status.starts_with("OK STATUS ")
-        || !status.contains(" PROFILE=GodMode ")
-        || !status.contains(" TRANSITION=Stable ")
-        || !status.contains(" ACTION_GATE=true ")
-        || !status.contains(" WORKER_GATE=true ")
+    let fields: Vec<_> = status.split_ascii_whitespace().collect();
+    if fields.get(..2) != Some(&["OK", "STATUS"]) {
+        return Err("resident supervisor returned an invalid status response".to_owned());
+    }
+    let unique_field = |name: &str| {
+        let mut values = fields[2..]
+            .iter()
+            .filter_map(|field| field.strip_prefix(name));
+        let value = values.next()?;
+        values.next().is_none().then_some(value)
+    };
+    if unique_field("PROFILE=") != Some("GodMode")
+        || unique_field("TRANSITION=") != Some("Stable")
+        || unique_field("ACTION_GATE=") != Some("true")
+        || unique_field("WORKER_GATE=") != Some("true")
     {
         return Err(
             "resident supervisor is not in stable God Mode; no preference was written".to_owned(),
         );
     }
-    status
-        .split_ascii_whitespace()
-        .find_map(|field| field.strip_prefix("GENERATION="))
+    unique_field("GENERATION=")
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or_else(|| "resident supervisor returned an invalid generation".to_owned())
+}
+
+/// Accept only one complete, exact console line. A bounded read prevents a
+/// pasted or piped megabyte-sized line from allocating without limit.
+fn read_save_confirmation<R: BufRead>(input: &mut R) -> Result<bool, String> {
+    const MAX_CONFIRMATION_BYTES: usize = 8;
+    let mut answer = Vec::with_capacity(MAX_CONFIRMATION_BYTES);
+    loop {
+        let available = input.fill_buf().map_err(io_error)?;
+        if available.is_empty() {
+            return Ok(false);
+        }
+        let line_bytes = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if answer.len() + line_bytes > MAX_CONFIRMATION_BYTES {
+            return Ok(false);
+        }
+        answer.extend_from_slice(&available[..line_bytes]);
+        input.consume(line_bytes);
+        if answer.ends_with(b"\n") {
+            return Ok(matches!(answer.as_slice(), b"SAVE\n" | b"SAVE\r\n"));
+        }
+    }
 }
 
 /// Requests the fixed FACEIT AC → Chrome → Steam sequence from the resident
@@ -943,6 +974,48 @@ mod tests {
         .is_err());
         assert!(
             admitted_memory_generation(&valid.replace("GENERATION=7", "GENERATION=bad")).is_err()
+        );
+        assert!(admitted_memory_generation(
+            &valid.replace("TRANSITION=Stable", "TRANSITION=EnteringCompetitive")
+        )
+        .is_err());
+        assert!(admitted_memory_generation(
+            &valid.replace("ACTION_GATE=true", "ACTION_GATE=false")
+        )
+        .is_err());
+        assert!(admitted_memory_generation(&format!("{valid} GENERATION=8")).is_err());
+        assert!(admitted_memory_generation(&format!("{valid} PROFILE=Competitive")).is_err());
+        assert!(admitted_memory_generation("ERR POLICY").is_err());
+    }
+
+    #[test]
+    fn preference_confirmation_accepts_only_a_complete_exact_bounded_line() {
+        for answer in [b"SAVE\n".as_slice(), b"SAVE\r\n"] {
+            assert_eq!(
+                read_save_confirmation(&mut io::Cursor::new(answer)),
+                Ok(true)
+            );
+        }
+        for answer in [
+            b"SAVE".as_slice(),
+            b"save\n",
+            b"SAVE \n",
+            b" SAVE\n",
+            b"SAVE\r\r\n",
+            b"\n",
+            b"SAV\n",
+            b"SAVE\0\n",
+            b"SAVE!!!!\n",
+        ] {
+            assert_eq!(
+                read_save_confirmation(&mut io::Cursor::new(answer)),
+                Ok(false)
+            );
+        }
+        let oversized = vec![b'x'; 1024 * 1024];
+        assert_eq!(
+            read_save_confirmation(&mut io::Cursor::new(oversized)),
+            Ok(false)
         );
     }
     use std::collections::VecDeque;

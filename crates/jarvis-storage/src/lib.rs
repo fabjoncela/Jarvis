@@ -13,14 +13,17 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::backup::Backup;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 const DATABASE_FILE: &str = "jarvis.db";
+const PRE_V2_BACKUP_FILE: &str = "jarvis.db.pre-v2.bak";
 const DATA_DIRECTORY: &str = "Jarvis";
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_STORED_RECORDS: i64 = 8_192;
@@ -37,7 +40,11 @@ pub enum StorageError {
     MigrationNameMismatch(u32),
     MigrationChecksumMismatch(u32),
     UnversionedDatabase,
+    BackupAlreadyExists,
+    BackupFailed(String),
     IdempotencyConflict,
+    PreferenceForgotten,
+    StalePreferenceRevision,
     CapacityReached,
     Sqlite(String),
 }
@@ -77,9 +84,22 @@ impl fmt::Display for StorageError {
             Self::UnversionedDatabase => formatter.write_str(
                 "database contains tables but no Jarvis migration history; refusing to modify it",
             ),
+            Self::BackupAlreadyExists => formatter.write_str(
+                "pre-v2 Jarvis database backup already exists; refusing to overwrite it or migrate",
+            ),
+            Self::BackupFailed(message) => write!(
+                formatter,
+                "could not create a verified pre-v2 database backup; migration was not run: {message}"
+            ),
             Self::IdempotencyConflict => {
                 formatter.write_str("event ID was already used for a different explicit record")
             }
+            Self::PreferenceForgotten => formatter.write_str(
+                "preference was forgotten; restoring it requires the current tombstone event ID",
+            ),
+            Self::StalePreferenceRevision => formatter.write_str(
+                "preference changed since the supplied event ID; no update was recorded",
+            ),
             Self::CapacityReached => {
                 formatter.write_str("explicit memory storage reached its fixed record limit")
             }
@@ -169,6 +189,16 @@ pub struct StoredPreference {
     pub created_at_ms: i64,
 }
 
+/// The active revocation marker for one forgotten preference. The old value
+/// is intentionally not returned; `superseded_event_id` is an audit anchor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredPreferenceTombstone {
+    pub event_id: EventId,
+    pub key: PreferenceKey,
+    pub superseded_event_id: EventId,
+    pub created_at_ms: i64,
+}
+
 /// The latest explicit correction stored for a term.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredCorrection {
@@ -185,11 +215,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "explicit_records",
-    sql: include_str!("../migrations/0001_explicit_records.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "explicit_records",
+        sql: include_str!("../migrations/0001_explicit_records.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "preference_tombstones",
+        sql: include_str!("../migrations/0002_preference_tombstones.sql"),
+    },
+];
 
 /// The sole storage handle. Its connection is intentionally not exposed or
 /// cloneable; the supervisor should own one handle and serialize all calls.
@@ -228,11 +265,12 @@ impl Store {
 
     fn open_database(path: PathBuf) -> Result<Self, StorageError> {
         let mut connection = Connection::open_with_flags(
-            path,
+            &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
         connection.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         connection.pragma_update(None, "trusted_schema", "OFF")?;
+        backup_before_v2_if_needed(&connection, &path)?;
         connection.pragma_update(None, "journal_mode", "DELETE")?;
         let journal_mode: String =
             connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
@@ -258,6 +296,46 @@ impl Store {
             event_id.as_str(),
             key.as_str(),
             target.as_str(),
+            None,
+        )
+    }
+
+    /// Appends a tombstone for the exact preference revision the user chose to
+    /// forget. The prior value remains in the local audit history; this does
+    /// not claim physical erasure from the database or backups. A stale view
+    /// cannot forget a newer value. A repeated event ID is idempotent.
+    pub fn forget_preference(
+        &mut self,
+        event_id: &EventId,
+        key: &PreferenceKey,
+        expected_current_event_id: &EventId,
+    ) -> Result<RecordOutcome, StorageError> {
+        self.record(
+            "preference_forget",
+            event_id.as_str(),
+            key.as_str(),
+            "forgotten",
+            Some(expected_current_event_id.as_str()),
+        )
+    }
+
+    /// Explicitly restores a forgotten preference. The caller must present
+    /// the exact current tombstone event ID; an old save or old restore cannot
+    /// cross a later forget boundary. Normal `record_preference` stays closed
+    /// for a key that has ever been forgotten.
+    pub fn restore_preference(
+        &mut self,
+        event_id: &EventId,
+        key: &PreferenceKey,
+        target: &ReferenceId,
+        expected_tombstone_event_id: &EventId,
+    ) -> Result<RecordOutcome, StorageError> {
+        self.record(
+            "preference_restore",
+            event_id.as_str(),
+            key.as_str(),
+            target.as_str(),
+            Some(expected_tombstone_event_id.as_str()),
         )
     }
 
@@ -274,10 +352,11 @@ impl Store {
             event_id.as_str(),
             term.as_str(),
             canonical_id.as_str(),
+            None,
         )
     }
 
-    /// Returns the most recently appended preference for a key.
+    /// Returns the active preference for a key, or `None` after a tombstone.
     pub fn preference(
         &self,
         key: &PreferenceKey,
@@ -285,9 +364,11 @@ impl Store {
         let row = self
             .connection
             .query_row(
-                "SELECT event_id, record_key, record_value, created_at_ms \
+                "SELECT event_id, record_kind, record_key, record_value, created_at_ms \
                  FROM explicit_records \
-                 WHERE record_kind = 'preference' AND record_key = ?1 \
+                 WHERE record_kind IN \
+                     ('preference', 'preference_forget', 'preference_restore') \
+                   AND record_key = ?1 \
                  ORDER BY sequence DESC LIMIT 1",
                 [key.as_str()],
                 |row| {
@@ -295,20 +376,64 @@ impl Store {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 },
             )
             .optional()?;
-        row.map(|(event_id, key, value, created_at_ms)| {
-            Ok(StoredPreference {
-                event_id: EventId::new(event_id)?,
-                key: PreferenceKey::new(key)?,
-                target: ReferenceId::new(value)?,
-                created_at_ms,
+        row.filter(|(_, kind, _, _, _)| kind != "preference_forget")
+            .map(|(event_id, _, key, value, created_at_ms)| {
+                Ok(StoredPreference {
+                    event_id: EventId::new(event_id)?,
+                    key: PreferenceKey::new(key)?,
+                    target: ReferenceId::new(value)?,
+                    created_at_ms,
+                })
             })
-        })
-        .transpose()
+            .transpose()
+    }
+
+    /// Returns the current tombstone, if the latest event for this key is a
+    /// forget event. This supplies the exact revision token for an explicit
+    /// future restore without revealing the retained old preference value.
+    pub fn preference_tombstone(
+        &self,
+        key: &PreferenceKey,
+    ) -> Result<Option<StoredPreferenceTombstone>, StorageError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT event_id, record_kind, record_key, causal_event_id, created_at_ms \
+                 FROM explicit_records \
+                 WHERE record_kind IN \
+                     ('preference', 'preference_forget', 'preference_restore') \
+                   AND record_key = ?1 \
+                 ORDER BY sequence DESC LIMIT 1",
+                [key.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.filter(|(_, kind, _, _, _)| kind == "preference_forget")
+            .map(|(event_id, _, key, superseded_event_id, created_at_ms)| {
+                Ok(StoredPreferenceTombstone {
+                    event_id: EventId::new(event_id)?,
+                    key: PreferenceKey::new(key)?,
+                    superseded_event_id: EventId::new(
+                        superseded_event_id.ok_or(StorageError::StalePreferenceRevision)?,
+                    )?,
+                    created_at_ms,
+                })
+            })
+            .transpose()
     }
 
     /// Returns the most recently appended correction for a single-token term.
@@ -351,6 +476,7 @@ impl Store {
         event_id: &str,
         key: &str,
         value: &str,
+        causal_event_id: Option<&str>,
     ) -> Result<RecordOutcome, StorageError> {
         let created_at_ms = unix_time_millis()?;
         let tx = self
@@ -358,7 +484,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = tx
             .query_row(
-                "SELECT record_kind, record_key, record_value \
+                "SELECT record_kind, record_key, record_value, causal_event_id \
                  FROM explicit_records WHERE event_id = ?1",
                 [event_id],
                 |row| {
@@ -366,15 +492,58 @@ impl Store {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((existing_kind, existing_key, existing_value)) = existing {
-            if existing_kind == kind && existing_key == key && existing_value == value {
+        if let Some((existing_kind, existing_key, existing_value, existing_causal)) = existing {
+            if existing_kind == kind
+                && existing_key == key
+                && existing_value == value
+                && existing_causal.as_deref() == causal_event_id
+            {
                 return Ok(RecordOutcome::AlreadyRecorded);
             }
             return Err(StorageError::IdempotencyConflict);
+        }
+
+        match kind {
+            "preference" => {
+                let has_forget: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM explicit_records \
+                     WHERE record_kind = 'preference_forget' AND record_key = ?1)",
+                    [key],
+                    |row| row.get(0),
+                )?;
+                if has_forget {
+                    return Err(StorageError::PreferenceForgotten);
+                }
+            }
+            "preference_forget" => {
+                let current = latest_preference_state(&tx, key)?;
+                if !matches!(
+                    current,
+                    Some((ref current_id, ref current_kind))
+                        if Some(current_id.as_str()) == causal_event_id
+                            && current_kind != "preference_forget"
+                ) {
+                    return Err(StorageError::StalePreferenceRevision);
+                }
+            }
+            "preference_restore" => {
+                let current = latest_preference_state(&tx, key)?;
+                if !matches!(
+                    current,
+                    Some((ref current_id, ref current_kind))
+                        if Some(current_id.as_str()) == causal_event_id
+                            && current_kind == "preference_forget"
+                ) {
+                    return Err(StorageError::StalePreferenceRevision);
+                }
+            }
+            "correction" => {}
+            _ => unreachable!("only fixed record kinds reach storage"),
         }
 
         // Records are append-only in this API, so the largest sequence is an
@@ -391,13 +560,93 @@ impl Store {
 
         tx.execute(
             "INSERT INTO explicit_records \
-             (event_id, record_kind, record_key, record_value, created_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![event_id, kind, key, value, created_at_ms],
+             (event_id, record_kind, record_key, record_value, causal_event_id, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![event_id, kind, key, value, causal_event_id, created_at_ms],
         )?;
         tx.commit()?;
         Ok(RecordOutcome::Inserted)
     }
+}
+
+/// The online backup API reads a transactionally consistent snapshot even if
+/// an old database is in WAL mode. The fixed sibling path is reserved with
+/// `create_new`, so an existing backup is never overwritten. Any failure
+/// leaves the source at v1; an incomplete reserved backup is intentionally
+/// retained for inspection instead of being mistaken for a valid backup.
+fn backup_before_v2_if_needed(
+    connection: &Connection,
+    source_path: &Path,
+) -> Result<(), StorageError> {
+    if !table_exists(connection, "schema_migrations")? {
+        return Ok(());
+    }
+    let history = read_migration_history(connection)?;
+    if history.len() != 1 || history[0].0 != 1 {
+        return Ok(());
+    }
+    let v1 = &MIGRATIONS[0];
+    if history[0].1 != v1.name || history[0].2 != migration_checksum(v1) {
+        // The standard migration validator will return the precise mismatch;
+        // do not create a backup of a schema this build cannot authenticate.
+        return Ok(());
+    }
+
+    let backup_path = source_path.with_file_name(PRE_V2_BACKUP_FILE);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup_path)
+    {
+        Ok(file) => drop(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(StorageError::BackupAlreadyExists);
+        }
+        Err(error) => return Err(StorageError::BackupFailed(error.to_string())),
+    }
+
+    let mut destination =
+        Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|error| StorageError::BackupFailed(error.to_string()))?;
+    destination
+        .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+        .map_err(|error| StorageError::BackupFailed(error.to_string()))?;
+    Backup::new(connection, &mut destination)
+        .and_then(|backup| backup.run_to_completion(64, Duration::from_millis(10), None))
+        .map_err(|error| StorageError::BackupFailed(error.to_string()))?;
+
+    let integrity: String = destination
+        .pragma_query_value(None, "integrity_check", |row| row.get(0))
+        .map_err(|error| StorageError::BackupFailed(error.to_string()))?;
+    if integrity != "ok" {
+        return Err(StorageError::BackupFailed(format!(
+            "backup integrity check returned {integrity}"
+        )));
+    }
+    let backup_history = read_migration_history(&destination)
+        .map_err(|error| StorageError::BackupFailed(error.to_string()))?;
+    if backup_history != history {
+        return Err(StorageError::BackupFailed(
+            "backup migration history differs from source".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn latest_preference_state(
+    connection: &Connection,
+    key: &str,
+) -> Result<Option<(String, String)>, StorageError> {
+    connection
+        .query_row(
+            "SELECT event_id, record_kind FROM explicit_records \
+             WHERE record_kind IN ('preference', 'preference_forget', 'preference_restore') \
+               AND record_key = ?1 ORDER BY sequence DESC LIMIT 1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 fn unix_time_millis() -> Result<i64, StorageError> {
@@ -594,7 +843,7 @@ mod tests {
                 .expect("collect tables")
         };
         assert_eq!(tables, ["explicit_records", "schema_migrations"]);
-        assert_eq!(read_migration_history(&store.connection).unwrap().len(), 1);
+        assert_eq!(read_migration_history(&store.connection).unwrap().len(), 2);
         let record_columns = {
             let mut statement = store
                 .connection
@@ -614,6 +863,7 @@ mod tests {
                 "record_kind",
                 "record_key",
                 "record_value",
+                "causal_event_id",
                 "created_at_ms"
             ]
         );
@@ -640,13 +890,107 @@ mod tests {
 
         let mut connection = Connection::open(directory.database_path()).unwrap();
         apply_migrations(&mut connection, MIGRATIONS).unwrap();
-        assert_eq!(read_migration_history(&connection).unwrap().len(), 1);
+        assert_eq!(read_migration_history(&connection).unwrap().len(), 2);
         drop(connection);
 
         let store = test_store(&directory);
         let stored = store.preference(&key).unwrap().unwrap();
         assert_eq!(stored.event_id, event_id("event-1"));
         assert_eq!(stored.target, reference_id("chrome"));
+    }
+
+    #[test]
+    fn version_one_database_upgrades_without_losing_explicit_records() {
+        let directory = TestDirectory::new();
+        let mut connection = Connection::open(directory.database_path()).unwrap();
+        apply_migrations(&mut connection, &MIGRATIONS[..1]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO explicit_records \
+                 (event_id, record_kind, record_key, record_value, created_at_ms) \
+                 VALUES ('legacy-pref', 'preference', 'preferred_browser', 'chrome', 1)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut store = test_store(&directory);
+        assert_eq!(read_migration_history(&store.connection).unwrap().len(), 2);
+        let backup = Connection::open_with_flags(
+            directory.0.join(PRE_V2_BACKUP_FILE),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("verified pre-v2 backup must exist");
+        assert_eq!(read_migration_history(&backup).unwrap().len(), 1);
+        let original: String = backup
+            .query_row(
+                "SELECT record_value FROM explicit_records WHERE event_id = 'legacy-pref'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(original, "chrome");
+        let key = preference_key("preferred_browser");
+        assert_eq!(
+            store.preference(&key).unwrap().unwrap().target,
+            reference_id("chrome")
+        );
+        assert_eq!(
+            store
+                .forget_preference(&event_id("forget-1"), &key, &event_id("legacy-pref"))
+                .unwrap(),
+            RecordOutcome::Inserted
+        );
+        assert!(store.preference(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn existing_backup_blocks_v1_upgrade_without_changing_source() {
+        let directory = TestDirectory::new();
+        let mut connection = Connection::open(directory.database_path()).unwrap();
+        apply_migrations(&mut connection, &MIGRATIONS[..1]).unwrap();
+        drop(connection);
+        let backup_path = directory.0.join(PRE_V2_BACKUP_FILE);
+        fs::write(&backup_path, b"keep existing backup").unwrap();
+
+        let result = Store::open_database(directory.database_path());
+        assert!(matches!(result, Err(StorageError::BackupAlreadyExists)));
+        assert_eq!(fs::read(&backup_path).unwrap(), b"keep existing backup");
+        let source = Connection::open(directory.database_path()).unwrap();
+        assert_eq!(read_migration_history(&source).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pre_v2_backup_includes_uncheckpointed_wal_data() {
+        let directory = TestDirectory::new();
+        let path = directory.database_path();
+        let mut source = Connection::open(&path).unwrap();
+        apply_migrations(&mut source, &MIGRATIONS[..1]).unwrap();
+        source.pragma_update(None, "journal_mode", "WAL").unwrap();
+        source
+            .execute(
+                "INSERT INTO explicit_records \
+                 (event_id, record_kind, record_key, record_value, created_at_ms) \
+                 VALUES ('wal-pref', 'preference', 'preferred_browser', 'discord', 1)",
+                [],
+            )
+            .unwrap();
+
+        backup_before_v2_if_needed(&source, &path).unwrap();
+        let backup = Connection::open_with_flags(
+            directory.0.join(PRE_V2_BACKUP_FILE),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let value: String = backup
+            .query_row(
+                "SELECT record_value FROM explicit_records WHERE event_id = 'wal-pref'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "discord");
+        assert_eq!(read_migration_history(&backup).unwrap().len(), 1);
     }
 
     #[test]
@@ -699,7 +1043,7 @@ mod tests {
                 .connection
                 .execute(
                     "INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) \
-                     VALUES (2, 'future', ?1, 1)",
+                     VALUES (3, 'future', ?1, 1)",
                     ["0".repeat(64)],
                 )
                 .unwrap();
@@ -707,7 +1051,7 @@ mod tests {
         let mut connection = Connection::open(directory.database_path()).unwrap();
         assert_eq!(
             apply_migrations(&mut connection, MIGRATIONS),
-            Err(StorageError::NewerSchemaVersion(2))
+            Err(StorageError::NewerSchemaVersion(3))
         );
     }
 
@@ -776,6 +1120,176 @@ mod tests {
             ),
             Err(StorageError::IdempotencyConflict)
         );
+    }
+
+    #[test]
+    fn forgetting_is_revision_bound_and_keeps_an_audit_tombstone() {
+        let directory = TestDirectory::new();
+        let key = preference_key("preferred_browser");
+        let mut store = test_store(&directory);
+        store
+            .record_preference(&event_id("save-1"), &key, &reference_id("chrome"))
+            .unwrap();
+        store
+            .record_preference(&event_id("save-2"), &key, &reference_id("firefox"))
+            .unwrap();
+
+        assert_eq!(
+            store.forget_preference(&event_id("forget-1"), &key, &event_id("save-1")),
+            Err(StorageError::StalePreferenceRevision)
+        );
+        assert_eq!(
+            store
+                .forget_preference(&event_id("forget-1"), &key, &event_id("save-2"))
+                .unwrap(),
+            RecordOutcome::Inserted
+        );
+        assert_eq!(
+            store
+                .forget_preference(&event_id("forget-1"), &key, &event_id("save-2"))
+                .unwrap(),
+            RecordOutcome::AlreadyRecorded
+        );
+        assert!(store.preference(&key).unwrap().is_none());
+        let tombstone = store.preference_tombstone(&key).unwrap().unwrap();
+        assert_eq!(tombstone.event_id, event_id("forget-1"));
+        assert_eq!(tombstone.superseded_event_id, event_id("save-2"));
+        let original_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM explicit_records WHERE record_key = ?1",
+                [key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(original_count, 3);
+        drop(store);
+
+        let reopened = test_store(&directory);
+        assert!(reopened.preference(&key).unwrap().is_none());
+        assert_eq!(
+            reopened
+                .preference_tombstone(&key)
+                .unwrap()
+                .unwrap()
+                .event_id,
+            event_id("forget-1")
+        );
+    }
+
+    #[test]
+    fn forgotten_key_rejects_delayed_saves_even_after_restore() {
+        let directory = TestDirectory::new();
+        let mut store = test_store(&directory);
+        let key = preference_key("preferred_browser");
+        let original = event_id("save-original");
+        store
+            .record_preference(&original, &key, &reference_id("chrome"))
+            .unwrap();
+        store
+            .forget_preference(&event_id("forget-1"), &key, &original)
+            .unwrap();
+
+        // A retry of the original event is harmless, while a first delivery
+        // of any old save is denied without relying on event-ID chronology.
+        assert_eq!(
+            store
+                .record_preference(&original, &key, &reference_id("chrome"))
+                .unwrap(),
+            RecordOutcome::AlreadyRecorded
+        );
+        assert_eq!(
+            store.record_preference(&event_id("delayed-old-save"), &key, &reference_id("chrome")),
+            Err(StorageError::PreferenceForgotten)
+        );
+        assert!(store.preference(&key).unwrap().is_none());
+
+        assert_eq!(
+            store.restore_preference(
+                &event_id("restore-1"),
+                &key,
+                &reference_id("firefox"),
+                &event_id("wrong-tombstone"),
+            ),
+            Err(StorageError::StalePreferenceRevision)
+        );
+        assert_eq!(
+            store
+                .restore_preference(
+                    &event_id("restore-1"),
+                    &key,
+                    &reference_id("firefox"),
+                    &event_id("forget-1"),
+                )
+                .unwrap(),
+            RecordOutcome::Inserted
+        );
+        assert_eq!(
+            store
+                .restore_preference(
+                    &event_id("restore-1"),
+                    &key,
+                    &reference_id("firefox"),
+                    &event_id("forget-1"),
+                )
+                .unwrap(),
+            RecordOutcome::AlreadyRecorded
+        );
+        assert_eq!(
+            store.preference(&key).unwrap().unwrap().target,
+            reference_id("firefox")
+        );
+        assert!(store.preference_tombstone(&key).unwrap().is_none());
+        assert_eq!(
+            store.record_preference(&event_id("delayed-again"), &key, &reference_id("chrome")),
+            Err(StorageError::PreferenceForgotten)
+        );
+        assert_eq!(
+            store.preference(&key).unwrap().unwrap().target,
+            reference_id("firefox")
+        );
+    }
+
+    #[test]
+    fn stale_forget_and_restore_cannot_cross_newer_revision() {
+        let directory = TestDirectory::new();
+        let mut store = test_store(&directory);
+        let key = preference_key("preferred_browser");
+        store
+            .record_preference(&event_id("save-1"), &key, &reference_id("chrome"))
+            .unwrap();
+        store
+            .forget_preference(&event_id("forget-1"), &key, &event_id("save-1"))
+            .unwrap();
+        store
+            .restore_preference(
+                &event_id("restore-1"),
+                &key,
+                &reference_id("firefox"),
+                &event_id("forget-1"),
+            )
+            .unwrap();
+        assert_eq!(
+            store.forget_preference(&event_id("stale-forget"), &key, &event_id("save-1")),
+            Err(StorageError::StalePreferenceRevision)
+        );
+        store
+            .forget_preference(&event_id("forget-2"), &key, &event_id("restore-1"))
+            .unwrap();
+        assert_eq!(
+            store.restore_preference(
+                &event_id("stale-restore"),
+                &key,
+                &reference_id("chrome"),
+                &event_id("forget-1"),
+            ),
+            Err(StorageError::StalePreferenceRevision)
+        );
+        assert_eq!(
+            store.forget_preference(&event_id("forget-2"), &key, &event_id("save-1")),
+            Err(StorageError::IdempotencyConflict)
+        );
+        assert!(store.preference(&key).unwrap().is_none());
     }
 
     #[test]

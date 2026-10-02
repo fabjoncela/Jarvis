@@ -14,6 +14,7 @@ use jarvis_core::{ProfileGeneration, RequestContext};
 
 const MAX_EVIDENCE: usize = 64;
 const MAX_FEEDBACK: usize = 32;
+const FEEDBACK_WINDOW: Duration = Duration::from_secs(5 * 60);
 static NEXT_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -94,7 +95,11 @@ pub enum VerificationError {
     DispatchMissing,
     ObservationBeforeDispatch,
     ObservationAfterDeadline,
+    ObservationFromFuture,
+    ObservationOutOfOrder,
     DispatchOutsideWindow,
+    FeedbackOutsideWindow,
+    Finalized,
     ConflictingDuplicate,
     CapacityReached,
 }
@@ -130,7 +135,16 @@ pub struct TrustedObservation {
 struct RecordedObservation {
     id: u64,
     observed_at: Instant,
+    received_at: Instant,
     finding: ObservationFinding,
+}
+
+/// A user report and its supervisor-supplied receipt time, retained separately
+/// from machine evidence.
+#[derive(Clone, Copy, Debug)]
+pub struct RecordedFeedback {
+    pub report: UserFeedback,
+    pub received_at: Instant,
 }
 
 /// One bounded execution ledger. An observation contract's target and expected
@@ -142,7 +156,7 @@ pub struct VerificationCase {
     deadline_at: Instant,
     dispatch: Option<(DispatchState, Instant)>,
     observations: Vec<RecordedObservation>,
-    feedback: Vec<UserFeedback>,
+    feedback: Vec<RecordedFeedback>,
     outcome: MachineOutcome,
 }
 
@@ -180,7 +194,7 @@ impl VerificationCase {
     }
 
     #[must_use]
-    pub fn feedback(&self) -> &[UserFeedback] {
+    pub fn feedback(&self) -> &[RecordedFeedback] {
         &self.feedback
     }
 
@@ -194,6 +208,9 @@ impl VerificationCase {
         self.check_anchor(anchor, current_generation)?;
         if self.dispatch.is_some() {
             return Err(VerificationError::DispatchAlreadyRecorded);
+        }
+        if self.outcome != MachineOutcome::Pending {
+            return Err(VerificationError::Finalized);
         }
         if at < self.created_at || at > self.deadline_at {
             return Err(VerificationError::DispatchOutsideWindow);
@@ -210,6 +227,7 @@ impl VerificationCase {
     pub fn record_observation(
         &mut self,
         observation: TrustedObservation,
+        received_at: Instant,
         current_generation: ProfileGeneration,
     ) -> Result<RecordResult, VerificationError> {
         self.check_anchor(observation.anchor, current_generation)?;
@@ -219,10 +237,13 @@ impl VerificationCase {
         if dispatch == DispatchState::Rejected {
             return Err(VerificationError::DispatchMissing);
         }
-        if observation.observed_at < dispatched_at {
+        if observation.observed_at > received_at {
+            return Err(VerificationError::ObservationFromFuture);
+        }
+        if observation.observed_at < dispatched_at || received_at < dispatched_at {
             return Err(VerificationError::ObservationBeforeDispatch);
         }
-        if observation.observed_at > self.deadline_at {
+        if observation.observed_at > self.deadline_at || received_at > self.deadline_at {
             return Err(VerificationError::ObservationAfterDeadline);
         }
         if let Some(existing) = self
@@ -238,12 +259,28 @@ impl VerificationCase {
                 Err(VerificationError::ConflictingDuplicate)
             };
         }
+        if matches!(
+            self.outcome,
+            MachineOutcome::VerifiedSuccess
+                | MachineOutcome::VerifiedFailure
+                | MachineOutcome::Unknown
+                | MachineOutcome::Canceled
+                | MachineOutcome::Blocked
+        ) {
+            return Err(VerificationError::Finalized);
+        }
+        if self.observations.last().is_some_and(|previous| {
+            observation.observed_at <= previous.observed_at || received_at < previous.received_at
+        }) {
+            return Err(VerificationError::ObservationOutOfOrder);
+        }
         if self.observations.len() == MAX_EVIDENCE {
             return Err(VerificationError::CapacityReached);
         }
         self.observations.push(RecordedObservation {
             id: observation.id,
             observed_at: observation.observed_at,
+            received_at,
             finding: observation.finding,
         });
         self.outcome = match observation.finding {
@@ -257,15 +294,26 @@ impl VerificationCase {
     pub fn record_feedback(
         &mut self,
         feedback: UserFeedback,
+        received_at: Instant,
+        current_generation: ProfileGeneration,
     ) -> Result<RecordResult, VerificationError> {
-        if feedback.anchor != self.anchor {
-            return Err(VerificationError::WrongExecution);
-        }
-        if self.dispatch.is_none() {
+        self.check_anchor(feedback.anchor, current_generation)?;
+        let Some((_, dispatched_at)) = self.dispatch else {
             return Err(VerificationError::DispatchMissing);
+        };
+        if !received_at
+            .checked_duration_since(dispatched_at)
+            .is_some_and(|age| age <= FEEDBACK_WINDOW)
+            || self.outcome == MachineOutcome::Canceled
+        {
+            return Err(VerificationError::FeedbackOutsideWindow);
         }
-        if let Some(existing) = self.feedback.iter().find(|item| item.id == feedback.id) {
-            return if *existing == feedback {
+        if let Some(existing) = self
+            .feedback
+            .iter()
+            .find(|item| item.report.id == feedback.id)
+        {
+            return if existing.report == feedback {
                 Ok(RecordResult::AlreadyRecorded)
             } else {
                 Err(VerificationError::ConflictingDuplicate)
@@ -274,7 +322,10 @@ impl VerificationCase {
         if self.feedback.len() == MAX_FEEDBACK {
             return Err(VerificationError::CapacityReached);
         }
-        self.feedback.push(feedback);
+        self.feedback.push(RecordedFeedback {
+            report: feedback,
+            received_at,
+        });
         Ok(RecordResult::Recorded)
     }
 
@@ -289,7 +340,10 @@ impl VerificationCase {
     /// A policy-generation change invalidates pending work.
     pub fn cancel_for_generation_change(&mut self, current_generation: ProfileGeneration) {
         if current_generation != self.anchor.request.generation
-            && self.outcome == MachineOutcome::Pending
+            && matches!(
+                self.outcome,
+                MachineOutcome::Pending | MachineOutcome::Partial
+            )
         {
             self.outcome = MachineOutcome::Canceled;
         }
@@ -347,11 +401,15 @@ mod tests {
             anchor.request.generation,
         )
         .unwrap();
-        case.record_feedback(UserFeedback {
-            id: 1,
-            anchor,
-            kind: FeedbackKind::Worked,
-        })
+        case.record_feedback(
+            UserFeedback {
+                id: 1,
+                anchor,
+                kind: FeedbackKind::Worked,
+            },
+            now,
+            anchor.request.generation,
+        )
         .unwrap();
         assert_eq!(case.machine_outcome(), MachineOutcome::Pending);
         case.expire(now + Duration::from_secs(6));
@@ -375,11 +433,11 @@ mod tests {
             ObservationFinding::Satisfied,
         );
         assert_eq!(
-            case.record_observation(observed, anchor.request.generation),
+            case.record_observation(observed, observed.observed_at, anchor.request.generation),
             Ok(RecordResult::Recorded)
         );
         assert_eq!(
-            case.record_observation(observed, anchor.request.generation),
+            case.record_observation(observed, observed.observed_at, anchor.request.generation),
             Ok(RecordResult::AlreadyRecorded)
         );
         assert_eq!(case.machine_outcome(), MachineOutcome::VerifiedSuccess);
@@ -402,7 +460,11 @@ mod tests {
             ObservationFinding::Satisfied,
         );
         assert_eq!(
-            case.record_observation(observed, anchor.request.generation.next()),
+            case.record_observation(
+                observed,
+                observed.observed_at,
+                anchor.request.generation.next()
+            ),
             Err(VerificationError::StaleGeneration)
         );
         let wrong = evidence(
@@ -412,7 +474,7 @@ mod tests {
             ObservationFinding::Satisfied,
         );
         assert_eq!(
-            case.record_observation(wrong, anchor.request.generation),
+            case.record_observation(wrong, wrong.observed_at, anchor.request.generation),
             Err(VerificationError::WrongExecution)
         );
         let late = evidence(
@@ -422,7 +484,7 @@ mod tests {
             ObservationFinding::Satisfied,
         );
         assert_eq!(
-            case.record_observation(late, anchor.request.generation),
+            case.record_observation(late, late.observed_at, anchor.request.generation),
             Err(VerificationError::ObservationAfterDeadline)
         );
         assert_eq!(case.machine_outcome(), MachineOutcome::Pending);
@@ -433,7 +495,7 @@ mod tests {
         let (mut case, now, anchor) = fixture();
         let before_dispatch = evidence(1, anchor, now, ObservationFinding::Satisfied);
         assert_eq!(
-            case.record_observation(before_dispatch, anchor.request.generation),
+            case.record_observation(before_dispatch, now, anchor.request.generation),
             Err(VerificationError::DispatchMissing)
         );
         case.record_dispatch(
@@ -444,7 +506,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            case.record_observation(before_dispatch, anchor.request.generation),
+            case.record_observation(before_dispatch, now, anchor.request.generation),
             Err(VerificationError::ObservationBeforeDispatch)
         );
         let valid = evidence(
@@ -453,7 +515,7 @@ mod tests {
             now + Duration::from_secs(2),
             ObservationFinding::Partial,
         );
-        case.record_observation(valid, anchor.request.generation)
+        case.record_observation(valid, valid.observed_at, anchor.request.generation)
             .unwrap();
         assert_eq!(
             case.record_observation(
@@ -463,6 +525,7 @@ mod tests {
                     now + Duration::from_secs(2),
                     ObservationFinding::Satisfied
                 ),
+                now + Duration::from_secs(2),
                 anchor.request.generation
             ),
             Err(VerificationError::ConflictingDuplicate)
@@ -487,6 +550,7 @@ mod tests {
                 now + Duration::from_secs(1),
                 ObservationFinding::Partial,
             ),
+            now + Duration::from_secs(1),
             anchor.request.generation,
         )
         .unwrap();
@@ -498,6 +562,7 @@ mod tests {
                 now + Duration::from_secs(2),
                 ObservationFinding::Failed,
             ),
+            now + Duration::from_secs(2),
             anchor.request.generation,
         )
         .unwrap();
@@ -519,23 +584,34 @@ mod tests {
             anchor,
             kind: FeedbackKind::Worked,
         };
-        assert_eq!(case.record_feedback(good), Ok(RecordResult::Recorded));
         assert_eq!(
-            case.record_feedback(good),
+            case.record_feedback(good, now, anchor.request.generation),
+            Ok(RecordResult::Recorded)
+        );
+        assert_eq!(
+            case.record_feedback(good, now, anchor.request.generation),
             Ok(RecordResult::AlreadyRecorded)
         );
         assert_eq!(
-            case.record_feedback(UserFeedback {
-                kind: FeedbackKind::Failed,
-                ..good
-            }),
+            case.record_feedback(
+                UserFeedback {
+                    kind: FeedbackKind::Failed,
+                    ..good
+                },
+                now,
+                anchor.request.generation
+            ),
             Err(VerificationError::ConflictingDuplicate)
         );
         assert_eq!(
-            case.record_feedback(UserFeedback {
-                anchor: ExecutionAnchor::new(anchor.request, ExecutionId::next()),
-                ..good
-            }),
+            case.record_feedback(
+                UserFeedback {
+                    anchor: ExecutionAnchor::new(anchor.request, ExecutionId::next()),
+                    ..good
+                },
+                now,
+                anchor.request.generation
+            ),
             Err(VerificationError::WrongExecution)
         );
         assert_eq!(case.feedback().len(), 1);
@@ -557,6 +633,7 @@ mod tests {
         assert_eq!(
             rejected.record_observation(
                 evidence(1, anchor, now, ObservationFinding::Satisfied),
+                now,
                 anchor.request.generation
             ),
             Err(VerificationError::DispatchMissing)
@@ -564,5 +641,168 @@ mod tests {
         let (mut pending, _, anchor) = fixture();
         pending.cancel_for_generation_change(anchor.request.generation.next());
         assert_eq!(pending.machine_outcome(), MachineOutcome::Canceled);
+    }
+
+    #[test]
+    fn late_or_stale_feedback_is_rejected_without_machine_verification() {
+        let (mut case, now, anchor) = fixture();
+        case.record_dispatch(
+            anchor,
+            DispatchState::Accepted,
+            now,
+            anchor.request.generation,
+        )
+        .unwrap();
+        let feedback = UserFeedback {
+            id: 10,
+            anchor,
+            kind: FeedbackKind::Worked,
+        };
+        assert_eq!(
+            case.record_feedback(feedback, now, anchor.request.generation.next()),
+            Err(VerificationError::StaleGeneration)
+        );
+        assert_eq!(
+            case.record_feedback(
+                feedback,
+                now + FEEDBACK_WINDOW + Duration::from_secs(1),
+                anchor.request.generation
+            ),
+            Err(VerificationError::FeedbackOutsideWindow)
+        );
+        assert_eq!(
+            case.record_feedback(
+                feedback,
+                now - Duration::from_secs(1),
+                anchor.request.generation
+            ),
+            Err(VerificationError::FeedbackOutsideWindow)
+        );
+        assert!(case.feedback().is_empty());
+        assert_eq!(case.machine_outcome(), MachineOutcome::Pending);
+    }
+
+    #[test]
+    fn backdated_or_out_of_order_observation_cannot_rewrite_result() {
+        let (mut case, now, anchor) = fixture();
+        case.record_dispatch(
+            anchor,
+            DispatchState::Accepted,
+            now,
+            anchor.request.generation,
+        )
+        .unwrap();
+        let partial = evidence(
+            1,
+            anchor,
+            now + Duration::from_secs(2),
+            ObservationFinding::Partial,
+        );
+        case.record_observation(
+            partial,
+            now + Duration::from_secs(3),
+            anchor.request.generation,
+        )
+        .unwrap();
+        assert_eq!(
+            case.record_observation(
+                evidence(
+                    2,
+                    anchor,
+                    now + Duration::from_secs(1),
+                    ObservationFinding::Satisfied,
+                ),
+                now + Duration::from_secs(4),
+                anchor.request.generation,
+            ),
+            Err(VerificationError::ObservationOutOfOrder)
+        );
+        assert_eq!(case.machine_outcome(), MachineOutcome::Partial);
+        let failure = evidence(
+            3,
+            anchor,
+            now + Duration::from_secs(4),
+            ObservationFinding::Failed,
+        );
+        case.record_observation(failure, failure.observed_at, anchor.request.generation)
+            .unwrap();
+        assert_eq!(
+            case.record_observation(
+                evidence(
+                    4,
+                    anchor,
+                    now + Duration::from_secs(5),
+                    ObservationFinding::Satisfied,
+                ),
+                now + Duration::from_secs(5),
+                anchor.request.generation,
+            ),
+            Err(VerificationError::Finalized)
+        );
+        assert_eq!(case.machine_outcome(), MachineOutcome::VerifiedFailure);
+    }
+
+    #[test]
+    fn expired_unknown_cannot_become_success_from_backdated_evidence() {
+        let (mut case, now, anchor) = fixture();
+        case.record_dispatch(
+            anchor,
+            DispatchState::Accepted,
+            now,
+            anchor.request.generation,
+        )
+        .unwrap();
+        case.expire(now + Duration::from_secs(6));
+        assert_eq!(case.machine_outcome(), MachineOutcome::Unknown);
+        let backdated = evidence(
+            1,
+            anchor,
+            now + Duration::from_secs(1),
+            ObservationFinding::Satisfied,
+        );
+        assert_eq!(
+            case.record_observation(
+                backdated,
+                now + Duration::from_secs(2),
+                anchor.request.generation
+            ),
+            Err(VerificationError::Finalized)
+        );
+        assert_eq!(
+            case.record_observation(
+                backdated,
+                now + Duration::from_secs(6),
+                anchor.request.generation
+            ),
+            Err(VerificationError::ObservationAfterDeadline)
+        );
+        assert_eq!(case.machine_outcome(), MachineOutcome::Unknown);
+    }
+
+    #[test]
+    fn observation_timestamp_must_not_be_ahead_of_receipt() {
+        let (mut case, now, anchor) = fixture();
+        case.record_dispatch(
+            anchor,
+            DispatchState::Accepted,
+            now,
+            anchor.request.generation,
+        )
+        .unwrap();
+        let future = evidence(
+            1,
+            anchor,
+            now + Duration::from_secs(2),
+            ObservationFinding::Satisfied,
+        );
+        assert_eq!(
+            case.record_observation(
+                future,
+                now + Duration::from_secs(1),
+                anchor.request.generation
+            ),
+            Err(VerificationError::ObservationFromFuture)
+        );
+        assert_eq!(case.machine_outcome(), MachineOutcome::Pending);
     }
 }

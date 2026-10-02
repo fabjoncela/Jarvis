@@ -1,0 +1,13 @@
+[package]
+name = "jarvis-session-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jarvis-core = { path = "../jarvis-core" }
+jarvis-verification = { path = "../jarvis-verification" }
+
+[lints]
+workspace = true

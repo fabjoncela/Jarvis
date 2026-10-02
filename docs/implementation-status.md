@@ -89,8 +89,19 @@ pre-match launch sequence, not a running desktop assistant:
     Tests use isolated temporary roots.
 15. `jarvis-verification` introduces a typed separation between dispatch,
     exact execution-anchored user feedback, and trusted machine outcomes.
-    No public caller can construct trusted machine observations yet. It is
-    not wired to OS observation or live action execution.
+    Receipt time, profile generation, deadlines, evidence order, and terminal
+    outcomes are enforced; feedback never promotes a machine outcome. No
+    public caller can construct trusted machine observations yet. It is not
+    wired to OS observation or live action execution.
+16. `jarvis-session-context` provides bounded RAM-only target and exact
+    execution-anchor history, with TTLs, ambiguity rejection, and monotonic
+    profile-generation invalidation. It stores no transcripts and is not yet
+    connected to the placeholder session worker.
+17. Storage has staged, revision-bound preference forget/restore operations.
+    A tombstone keeps audit history and blocks stale save retries; explicit
+    restoration requires its exact event ID. No forget/restore CLI exists yet.
+    An existing v1 database must receive a verified SQLite-consistent backup
+    before the v2 migration; failure or a pre-existing backup blocks upgrade.
 
 ## Explicitly not implemented
 
@@ -105,7 +116,8 @@ pre-match launch sequence, not a running desktop assistant:
 - general desktop application, audio, browser, file, service, or system action
   execution; only the fixed confirmation-gated pre-match sequence can launch
   the FACEIT AC launcher, Chrome, and Steam app 730
-- general-purpose memory commands or a learning pipeline, general-purpose IPC, tray
+- a user-facing forget/restore command, general-purpose memory commands or a
+  learning pipeline, general-purpose IPC, tray
   UI, microphone, STT, TTS, Qwen, or learning workers
 
 ## Measurement result (2 October 2026)
