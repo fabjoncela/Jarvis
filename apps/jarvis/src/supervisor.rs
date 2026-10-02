@@ -20,7 +20,7 @@ use jarvis_profiles::{
 use jarvis_router::{RouteResult, Router};
 use jarvis_storage::{
     CanonicalId, CorrectionTerm, EventId, PreferenceKey, RecordOutcome, ReferenceId, StorageError,
-    Store, StoredPreference,
+    Store, StoredPreference, StoredPreferenceTombstone,
 };
 use jarvis_windows::{
     run_pre_match_handoff, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport, Win32Error,
@@ -295,6 +295,41 @@ impl Supervisor {
     ) -> Result<Option<StoredPreference>, PersistentMemoryError> {
         self.with_persistent_store(expected_generation, Store::open_local_app_data, |store| {
             store.preference(key)
+        })
+    }
+
+    pub fn read_explicit_preference_tombstone(
+        &self,
+        expected_generation: u64,
+        key: &PreferenceKey,
+    ) -> Result<Option<StoredPreferenceTombstone>, PersistentMemoryError> {
+        self.with_persistent_store(expected_generation, Store::open_local_app_data, |store| {
+            store.preference_tombstone(key)
+        })
+    }
+
+    pub fn forget_explicit_preference(
+        &self,
+        expected_generation: u64,
+        event_id: &EventId,
+        key: &PreferenceKey,
+        expected_current_event_id: &EventId,
+    ) -> Result<RecordOutcome, PersistentMemoryError> {
+        self.with_persistent_store(expected_generation, Store::open_local_app_data, |store| {
+            store.forget_preference(event_id, key, expected_current_event_id)
+        })
+    }
+
+    pub fn restore_explicit_preference(
+        &self,
+        expected_generation: u64,
+        event_id: &EventId,
+        key: &PreferenceKey,
+        target: &ReferenceId,
+        expected_tombstone_event_id: &EventId,
+    ) -> Result<RecordOutcome, PersistentMemoryError> {
+        self.with_persistent_store(expected_generation, Store::open_local_app_data, |store| {
+            store.restore_preference(event_id, key, target, expected_tombstone_event_id)
         })
     }
 

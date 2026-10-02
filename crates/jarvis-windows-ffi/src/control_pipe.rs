@@ -12,6 +12,7 @@ use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_MORE_DATA,
@@ -37,9 +38,11 @@ use windows_sys::Win32::System::Threading::{
 
 const PIPE_NAME: &str = r"\\.\pipe\Jarvis.CompetitiveSupervisor.v1";
 const PIPE_OWNER_DACL: &str = "D:P(A;;GA;;;OW)";
-const MAX_REQUEST_BYTES: usize = 96;
+const MAX_REQUEST_BYTES: usize = 160;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024;
 const REMEMBER_PREFERRED_APP_PREFIX: &str = "JARVIS/1 REMEMBER_PREFERRED_APP ";
+const FORGET_PREFERRED_APP_PREFIX: &str = "JARVIS/1 FORGET_PREFERRED_APP ";
+const RESTORE_PREFERRED_APP_PREFIX: &str = "JARVIS/1 RESTORE_PREFERRED_APP ";
 
 /// The complete set of application references accepted by the preferred-app
 /// control protocol. These are identifiers, never executable paths.
@@ -85,6 +88,18 @@ pub enum SupervisorControlCommand {
         app: PreferredApp,
     },
     ShowPreferredApp,
+    PreferredAppState,
+    ForgetPreferredApp {
+        event_id: u128,
+        expected_generation: u64,
+        expected_event_id: u128,
+    },
+    RestorePreferredApp {
+        event_id: u128,
+        expected_generation: u64,
+        app: PreferredApp,
+        expected_tombstone_id: u128,
+    },
 }
 
 impl SupervisorControlCommand {
@@ -103,6 +118,11 @@ impl SupervisorControlCommand {
             )
             .into_bytes(),
             Self::ShowPreferredApp => b"JARVIS/1 SHOW_PREFERRED_APP".to_vec(),
+            Self::PreferredAppState => b"JARVIS/1 PREFERRED_APP_STATE".to_vec(),
+            Self::ForgetPreferredApp { event_id, expected_generation, expected_event_id } =>
+                format!("{FORGET_PREFERRED_APP_PREFIX}{event_id:032x} {expected_generation} {expected_event_id:032x}").into_bytes(),
+            Self::RestorePreferredApp { event_id, expected_generation, app, expected_tombstone_id } =>
+                format!("{RESTORE_PREFERRED_APP_PREFIX}{event_id:032x} {expected_generation} {} {expected_tombstone_id:032x}", app.wire()).into_bytes(),
         }
     }
 
@@ -115,8 +135,33 @@ impl SupervisorControlCommand {
             b"JARVIS/1 PREPARE_FACEIT_CS2" => Some(Self::PrepareFaceitCs2),
             b"JARVIS/1 WORKER_SELF_CHECK" => Some(Self::WorkerSelfCheck),
             b"JARVIS/1 SHOW_PREFERRED_APP" => Some(Self::ShowPreferredApp),
+            b"JARVIS/1 PREFERRED_APP_STATE" => Some(Self::PreferredAppState),
             _ => {
                 let text = std::str::from_utf8(bytes).ok()?;
+                if let Some(fields) = text.strip_prefix(FORGET_PREFERRED_APP_PREFIX) {
+                    let mut parts = fields.split(' ');
+                    let event_id = parse_event_id(parts.next()?)?;
+                    let expected_generation = parse_generation(parts.next()?)?;
+                    let expected_event_id = parse_event_id(parts.next()?)?;
+                    return parts.next().is_none().then_some(Self::ForgetPreferredApp {
+                        event_id,
+                        expected_generation,
+                        expected_event_id,
+                    });
+                }
+                if let Some(fields) = text.strip_prefix(RESTORE_PREFERRED_APP_PREFIX) {
+                    let mut parts = fields.split(' ');
+                    let event_id = parse_event_id(parts.next()?)?;
+                    let expected_generation = parse_generation(parts.next()?)?;
+                    let app = PreferredApp::parse_wire(parts.next()?)?;
+                    let expected_tombstone_id = parse_event_id(parts.next()?)?;
+                    return parts.next().is_none().then_some(Self::RestorePreferredApp {
+                        event_id,
+                        expected_generation,
+                        app,
+                        expected_tombstone_id,
+                    });
+                }
                 let fields = text.strip_prefix(REMEMBER_PREFERRED_APP_PREFIX)?;
                 let mut parts = fields.split(' ');
                 let event_hex = parts.next()?;
@@ -141,6 +186,27 @@ impl SupervisorControlCommand {
             }
         }
     }
+}
+
+fn parse_event_id(value: &str) -> Option<u128> {
+    if value.len() != 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    u128::from_str_radix(value, 16).ok()
+}
+
+fn parse_generation(value: &str) -> Option<u64> {
+    if value.is_empty()
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    value.parse().ok()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -372,33 +438,54 @@ fn send_supervisor_control_request_to(
     command: SupervisorControlCommand,
 ) -> Result<String, SupervisorControlPipeError> {
     let pipe_name = wide(name);
-    // SAFETY: the pipe name is NUL-terminated and remains live for this call.
-    let waited = unsafe { WaitNamedPipeW(pipe_name.as_ptr(), 1_500) };
-    if waited == 0 {
-        // SAFETY: capture the error immediately after WaitNamedPipeW.
-        let code = unsafe { GetLastError() };
-        return Err(SupervisorControlPipeError::Unavailable {
-            operation: "wait",
-            code,
-        });
-    }
+    let deadline = Instant::now() + Duration::from_millis(1_500);
+    let handle = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(SupervisorControlPipeError::Unavailable {
+                operation: "wait",
+                code: ERROR_PIPE_BUSY,
+            });
+        }
+        // SAFETY: the pipe name is NUL-terminated and remains live for this call.
+        let waited =
+            unsafe { WaitNamedPipeW(pipe_name.as_ptr(), remaining.as_millis().max(1) as u32) };
+        if waited == 0 {
+            // SAFETY: capture the error immediately after WaitNamedPipeW.
+            let code = unsafe { GetLastError() };
+            return Err(SupervisorControlPipeError::Unavailable {
+                operation: "wait",
+                code,
+            });
+        }
 
-    // SAFETY: the name is valid, and the client requests only synchronous
-    // read/write access to the fixed local pipe.
-    let handle = unsafe {
-        CreateFileW(
-            pipe_name.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            null(),
-            OPEN_EXISTING,
-            0,
-            null_mut(),
-        )
+        // SAFETY: the name is valid, and the client requests only synchronous
+        // read/write access to the fixed local pipe.
+        let handle = unsafe {
+            CreateFileW(
+                pipe_name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        };
+        if handle != INVALID_HANDLE_VALUE {
+            break handle;
+        }
+        // Another client can win the instance between WaitNamedPipe and
+        // CreateFile; retry only that race within the original deadline.
+        // SAFETY: capture the error immediately after CreateFileW.
+        let code = unsafe { GetLastError() };
+        if code != ERROR_PIPE_BUSY {
+            return Err(SupervisorControlPipeError::Unavailable {
+                operation: "open",
+                code,
+            });
+        }
     };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(last_error("open"));
-    }
     let result = send_connected_request(handle, command);
     // SAFETY: this client handle is owned by the current function.
     unsafe {
@@ -664,6 +751,39 @@ mod tests {
             SupervisorControlCommand::parse(&SupervisorControlCommand::ShowPreferredApp.wire()),
             Some(SupervisorControlCommand::ShowPreferredApp)
         );
+        assert_eq!(
+            SupervisorControlCommand::parse(&SupervisorControlCommand::PreferredAppState.wire()),
+            Some(SupervisorControlCommand::PreferredAppState)
+        );
+    }
+
+    #[test]
+    fn revision_bound_preference_commands_are_canonical_and_bounded() {
+        let forget = SupervisorControlCommand::ForgetPreferredApp {
+            event_id: u128::MAX,
+            expected_generation: u64::MAX,
+            expected_event_id: u128::MAX - 1,
+        };
+        let restore = SupervisorControlCommand::RestorePreferredApp {
+            event_id: u128::MAX,
+            expected_generation: u64::MAX,
+            app: PreferredApp::Discord,
+            expected_tombstone_id: u128::MAX - 1,
+        };
+        for command in [forget, restore] {
+            let wire = command.wire();
+            assert!(wire.len() <= MAX_REQUEST_BYTES);
+            assert_eq!(SupervisorControlCommand::parse(&wire), Some(command));
+            let canonical = String::from_utf8(wire).unwrap();
+            for invalid in [
+                format!("{canonical} "),
+                format!("{canonical}\n"),
+                canonical.replace("ffffffff", "FFFFFFFF"),
+                canonical.replace(" 18446744073709551615 ", " 018446744073709551615 "),
+            ] {
+                assert_eq!(SupervisorControlCommand::parse(invalid.as_bytes()), None);
+            }
+        }
     }
 
     #[test]

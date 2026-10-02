@@ -50,6 +50,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--worker-self-check" => return worker_self_check_client(),
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
         [flag] if flag == "--show-preferred-app" => return show_preferred_app(),
+        [flag] if flag == "--clear-preferred-app" => return clear_preferred_app(),
         [flag, app] if flag == "--remember-preferred-app" => {
             return remember_preferred_app(app);
         }
@@ -79,7 +80,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -661,6 +662,44 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 }
             }
         }
+        SupervisorControlCommand::PreferredAppState => {
+            let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
+            match supervisor.read_explicit_preference(status.generation.value(), &key) {
+                Ok(Some(stored)) if matches!(stored.target.as_str(), "chrome" | "discord") => {
+                    Ok(format!("OK PREF_STATE ACTIVE APP={} EVENT={}", stored.target.as_str(), stored.event_id.as_str()))
+                }
+                Ok(Some(_)) => Ok("ERR STORED_VALUE".to_owned()),
+                Ok(None) => match supervisor.read_explicit_preference_tombstone(status.generation.value(), &key) {
+                    Ok(Some(tombstone)) => Ok(format!("OK PREF_STATE FORGOTTEN TOMBSTONE={}", tombstone.event_id.as_str())),
+                    Ok(None) => Ok("OK PREF_STATE NONE".to_owned()),
+                    Err(supervisor::PersistentMemoryError::ProfileGateClosed | supervisor::PersistentMemoryError::StaleGeneration) => Ok("ERR POLICY".to_owned()),
+                    Err(error) => { eprintln!("preferred app state read failed: {error}"); Ok("ERR STORAGE".to_owned()) }
+                },
+                Err(supervisor::PersistentMemoryError::ProfileGateClosed | supervisor::PersistentMemoryError::StaleGeneration) => Ok("ERR POLICY".to_owned()),
+                Err(error) => { eprintln!("preferred app state read failed: {error}"); Ok("ERR STORAGE".to_owned()) }
+            }
+        }
+        SupervisorControlCommand::ForgetPreferredApp { event_id, expected_generation, expected_event_id } => {
+            let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
+            let id = EventId::new(format!("{event_id:032x}")).map_err(|error| error.to_string())?;
+            let expected = EventId::new(format!("{expected_event_id:032x}")).map_err(|error| error.to_string())?;
+            match supervisor.forget_explicit_preference(expected_generation, &id, &key, &expected) {
+                Ok(outcome) => Ok(format!("OK PREFERRED_APP CLEARED RESULT={outcome:?}")),
+                Err(supervisor::PersistentMemoryError::ProfileGateClosed | supervisor::PersistentMemoryError::StaleGeneration) => Ok("ERR POLICY".to_owned()),
+                Err(error) => { eprintln!("preferred app clear failed: {error}"); Ok("ERR STORAGE".to_owned()) }
+            }
+        }
+        SupervisorControlCommand::RestorePreferredApp { event_id, expected_generation, app, expected_tombstone_id } => {
+            let key = PreferenceKey::new("preferred_app").map_err(|error| error.to_string())?;
+            let id = EventId::new(format!("{event_id:032x}")).map_err(|error| error.to_string())?;
+            let expected = EventId::new(format!("{expected_tombstone_id:032x}")).map_err(|error| error.to_string())?;
+            let target = ReferenceId::new(app.application_id()).map_err(|error| error.to_string())?;
+            match supervisor.restore_explicit_preference(expected_generation, &id, &key, &target, &expected) {
+                Ok(outcome) => Ok(format!("OK PREFERRED_APP APP={} RESULT={outcome:?}", app.application_id())),
+                Err(supervisor::PersistentMemoryError::ProfileGateClosed | supervisor::PersistentMemoryError::StaleGeneration) => Ok("ERR POLICY".to_owned()),
+                Err(error) => { eprintln!("preferred app restore failed: {error}"); Ok("ERR STORAGE".to_owned()) }
+            }
+        }
         SupervisorControlCommand::PrepareFaceitCs2 => {
             if !status.action_gate_open {
                 return Ok("ERR POLICY".to_owned());
@@ -818,27 +857,38 @@ fn remember_preferred_app(app: &str) -> Result<(), String> {
     let status = send_supervisor_control_request(SupervisorControlCommand::Status)
         .map_err(|error| format!("resident supervisor unavailable: {error}"))?;
     let expected_generation = admitted_memory_generation(&status)?;
+    let state = preferred_app_state()?;
     println!("Save {} as your preferred app? This is informational and will not change launches or routing.", app.application_id());
+    if matches!(state, PreferredAppMemoryState::Forgotten { .. }) {
+        println!("This will explicitly restore a previously cleared preference; its local audit history remains.");
+    }
     print!("Type SAVE to continue, or press Enter to cancel: ");
     io::stdout().flush().map_err(io_error)?;
     if !read_save_confirmation(&mut io::stdin().lock())? {
         println!("Cancelled; no preference was written.");
         return Ok(());
     }
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let event_id = nanos ^ (u128::from(std::process::id()) << 96);
-    let response =
-        send_supervisor_control_request(SupervisorControlCommand::RememberPreferredApp {
-            event_id,
-            expected_generation,
-            app,
-        })
-        .map_err(|error| {
-            format!("resident supervisor unavailable; no preference was written: {error}")
-        })?;
+    let event_id = new_preference_event_id()?;
+    let command = match state {
+        PreferredAppMemoryState::Forgotten { tombstone_id } => {
+            SupervisorControlCommand::RestorePreferredApp {
+                event_id,
+                expected_generation,
+                app,
+                expected_tombstone_id: tombstone_id,
+            }
+        }
+        PreferredAppMemoryState::None | PreferredAppMemoryState::Active { .. } => {
+            SupervisorControlCommand::RememberPreferredApp {
+                event_id,
+                expected_generation,
+                app,
+            }
+        }
+    };
+    let response = send_supervisor_control_request(command).map_err(|error| {
+        format!("resident supervisor unavailable; no preference was written: {error}")
+    })?;
     if response
         == format!(
             "OK PREFERRED_APP APP={} RESULT=Inserted",
@@ -857,6 +907,103 @@ fn remember_preferred_app(app: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("preference was not saved: {response}"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreferredAppMemoryState {
+    None,
+    Active { app: PreferredApp, event_id: u128 },
+    Forgotten { tombstone_id: u128 },
+}
+
+fn preferred_app_state() -> Result<PreferredAppMemoryState, String> {
+    let response = send_supervisor_control_request(SupervisorControlCommand::PreferredAppState)
+        .map_err(|error| format!("resident supervisor unavailable: {error}"))?;
+    parse_preferred_app_state(&response)
+}
+
+fn parse_preferred_app_state(response: &str) -> Result<PreferredAppMemoryState, String> {
+    let fields: Vec<_> = response.split_ascii_whitespace().collect();
+    if fields.join(" ") != response {
+        return Err("invalid preferred-app state".to_owned());
+    }
+    match fields.as_slice() {
+        ["OK", "PREF_STATE", "NONE"] => Ok(PreferredAppMemoryState::None),
+        ["OK", "PREF_STATE", "ACTIVE", app, event] => {
+            let app = match *app {
+                "APP=chrome" => PreferredApp::Chrome,
+                "APP=discord" => PreferredApp::Discord,
+                _ => return Err("invalid preferred-app state".to_owned()),
+            };
+            let event_id = parse_preference_event_field(event, "EVENT=")?;
+            Ok(PreferredAppMemoryState::Active { app, event_id })
+        }
+        ["OK", "PREF_STATE", "FORGOTTEN", event] => {
+            let tombstone_id = parse_preference_event_field(event, "TOMBSTONE=")?;
+            Ok(PreferredAppMemoryState::Forgotten { tombstone_id })
+        }
+        _ => Err(format!("preferred-app state unavailable: {response}")),
+    }
+}
+
+fn parse_preference_event_field(field: &str, prefix: &str) -> Result<u128, String> {
+    let value = field
+        .strip_prefix(prefix)
+        .ok_or_else(|| "invalid preferred-app revision".to_owned())?;
+    if value.len() != 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("invalid preferred-app revision".to_owned());
+    }
+    u128::from_str_radix(value, 16).map_err(|_| "invalid preferred-app revision".to_owned())
+}
+
+fn new_preference_event_id() -> Result<u128, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    Ok(nanos ^ (u128::from(std::process::id()) << 96))
+}
+
+fn clear_preferred_app() -> Result<(), String> {
+    let status = send_supervisor_control_request(SupervisorControlCommand::Status)
+        .map_err(|error| format!("resident supervisor unavailable: {error}"))?;
+    let expected_generation = admitted_memory_generation(&status)?;
+    let state = preferred_app_state()?;
+    let PreferredAppMemoryState::Active {
+        app,
+        event_id: expected_event_id,
+    } = state
+    else {
+        println!("No active preferred app to clear.");
+        return Ok(());
+    };
+    println!("Clear {} as your active preferred app? The old value remains in local audit history; this is not permanent erasure.", app.application_id());
+    print!("Type CLEAR to continue, or press Enter to cancel: ");
+    io::stdout().flush().map_err(io_error)?;
+    if !read_exact_confirmation(&mut io::stdin().lock(), b"CLEAR\n", b"CLEAR\r\n")? {
+        println!("Cancelled; the preference was not changed.");
+        return Ok(());
+    }
+    let response = send_supervisor_control_request(SupervisorControlCommand::ForgetPreferredApp {
+        event_id: new_preference_event_id()?,
+        expected_generation,
+        expected_event_id,
+    })
+    .map_err(|error| format!("resident supervisor unavailable; preference not cleared: {error}"))?;
+    if matches!(
+        response.as_str(),
+        "OK PREFERRED_APP CLEARED RESULT=Inserted"
+            | "OK PREFERRED_APP CLEARED RESULT=AlreadyRecorded"
+    ) {
+        println!("Active preferred app cleared. Its local audit history remains.");
+        Ok(())
+    } else {
+        Err(format!("preference was not cleared: {response}"))
     }
 }
 
@@ -889,6 +1036,14 @@ fn admitted_memory_generation(status: &str) -> Result<u64, String> {
 /// Accept only one complete, exact console line. A bounded read prevents a
 /// pasted or piped megabyte-sized line from allocating without limit.
 fn read_save_confirmation<R: BufRead>(input: &mut R) -> Result<bool, String> {
+    read_exact_confirmation(input, b"SAVE\n", b"SAVE\r\n")
+}
+
+fn read_exact_confirmation<R: BufRead>(
+    input: &mut R,
+    lf: &[u8],
+    crlf: &[u8],
+) -> Result<bool, String> {
     const MAX_CONFIRMATION_BYTES: usize = 8;
     let mut answer = Vec::with_capacity(MAX_CONFIRMATION_BYTES);
     loop {
@@ -906,7 +1061,7 @@ fn read_save_confirmation<R: BufRead>(input: &mut R) -> Result<bool, String> {
         answer.extend_from_slice(&available[..line_bytes]);
         input.consume(line_bytes);
         if answer.ends_with(b"\n") {
-            return Ok(matches!(answer.as_slice(), b"SAVE\n" | b"SAVE\r\n"));
+            return Ok(answer.as_slice() == lf || answer.as_slice() == crlf);
         }
     }
 }
@@ -1017,6 +1172,46 @@ mod tests {
             read_save_confirmation(&mut io::Cursor::new(oversized)),
             Ok(false)
         );
+        assert_eq!(
+            read_exact_confirmation(&mut io::Cursor::new(b"CLEAR\n"), b"CLEAR\n", b"CLEAR\r\n"),
+            Ok(true)
+        );
+        assert_eq!(
+            read_exact_confirmation(&mut io::Cursor::new(b"CLEAR "), b"CLEAR\n", b"CLEAR\r\n"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn preferred_app_state_parser_requires_exact_revision_and_closed_app() {
+        assert_eq!(
+            parse_preferred_app_state("OK PREF_STATE NONE"),
+            Ok(PreferredAppMemoryState::None)
+        );
+        assert_eq!(
+            parse_preferred_app_state(
+                "OK PREF_STATE ACTIVE APP=chrome EVENT=000000000000000000000000000000ab"
+            ),
+            Ok(PreferredAppMemoryState::Active {
+                app: PreferredApp::Chrome,
+                event_id: 0xab
+            })
+        );
+        assert_eq!(
+            parse_preferred_app_state(
+                "OK PREF_STATE FORGOTTEN TOMBSTONE=000000000000000000000000000000cd"
+            ),
+            Ok(PreferredAppMemoryState::Forgotten { tombstone_id: 0xcd })
+        );
+        for invalid in [
+            "OK PREF_STATE ACTIVE APP=cs2 EVENT=000000000000000000000000000000ab",
+            "OK PREF_STATE ACTIVE APP=chrome EVENT=000000000000000000000000000000AB",
+            "OK PREF_STATE ACTIVE APP=chrome EVENT=ab",
+            "OK PREF_STATE FORGOTTEN TOMBSTONE=000000000000000000000000000000cd EXTRA=1",
+            "ERR POLICY",
+        ] {
+            assert!(parse_preferred_app_state(invalid).is_err());
+        }
     }
     use std::collections::VecDeque;
 

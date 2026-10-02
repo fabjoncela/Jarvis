@@ -65,7 +65,8 @@ pre-match launch sequence, not a running desktop assistant:
     `--detection-self-check` runs one reconciliation cycle and exits. For the
     current Windows account, the monitor owns one exclusive, owner-only local
     named pipe with a fixed protocol (`STATUS`, `PREPARE_FACEIT_CS2`,
-    `WORKER_SELF_CHECK`, `REMEMBER_PREFERRED_APP`, and `SHOW_PREFERRED_APP`).
+    `WORKER_SELF_CHECK`, and bounded preferred-app state/save/clear/restore
+    commands).
     It rejects remote clients and validates the connected
     client's executable path. Handoff and worker-start CLI commands require
     this authority and are serialized on the same owner; they fail closed if it
@@ -97,9 +98,12 @@ pre-match launch sequence, not a running desktop assistant:
     execution-anchor history, with TTLs, ambiguity rejection, and monotonic
     profile-generation invalidation. It stores no transcripts and is not yet
     connected to the placeholder session worker.
-17. Storage has staged, revision-bound preference forget/restore operations.
+17. Storage has revision-bound preference forget/restore operations.
     A tombstone keeps audit history and blocks stale save retries; explicit
-    restoration requires its exact event ID. No forget/restore CLI exists yet.
+    restoration requires its exact event ID. `--clear-preferred-app` asks for
+    `CLEAR` and revokes only the observed revision; a later
+    `--remember-preferred-app` asks for `SAVE` and restores from the current
+    tombstone. Neither command launches an app or changes routing.
     An existing v1 database must receive a verified SQLite-consistent backup
     before the v2 migration; failure or a pre-existing backup blocks upgrade.
 
@@ -116,8 +120,7 @@ pre-match launch sequence, not a running desktop assistant:
 - general desktop application, audio, browser, file, service, or system action
   execution; only the fixed confirmation-gated pre-match sequence can launch
   the FACEIT AC launcher, Chrome, and Steam app 730
-- a user-facing forget/restore command, general-purpose memory commands or a
-  learning pipeline, general-purpose IPC, tray
+- general-purpose memory commands or a learning pipeline, general-purpose IPC, tray
   UI, microphone, STT, TTS, Qwen, or learning workers
 
 ## Measurement result (2 October 2026)
@@ -149,11 +152,15 @@ result below verifies policy transitions but does not establish live OS
 detection latency. Keep startup reconciliation and fail-closed behavior
 authoritative, and do not add a general executable- or PID-based API.
 
-The updated monitor executable was tested in an isolated target directory but
-was not substituted for or used to restart the already-running resident
-monitor. The user's live monitor was left untouched. The new preferred-app
-commands require a matching updated resident monitor before they can be used;
-they have not been exercised against the production database.
+The resident monitor was updated while detection was healthy and CS2, the
+verified FACEIT launcher, and `FACEITService` were inactive. It now runs from
+`target\next-memory-ui\debug\jarvis.exe` as an explicit hidden process, not
+an installed service or automatic-start application. Status and preferred-app
+read/empty-clear/canceled-save commands were exercised through its fixed pipe.
+The read created an empty `%LOCALAPPDATA%\Jarvis\jarvis.db`; no preference was
+saved or cleared. Five concurrent status clients succeeded after a bounded
+busy-pipe retry was added. No game, browser, FACEIT component, or service was
+started or stopped for these checks.
 
 ## Controlled transition fixture result
 

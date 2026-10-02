@@ -96,11 +96,12 @@ informational only, and does not affect routing or launch decisions. There is
 no general memory command or learning pipeline. Tests use isolated
 temporary roots rather than the production path.
 
-The storage adapter now also has a staged, revision-bound preference tombstone
-operation. It preserves an audit record rather than claiming physical erasure;
-ordinary saves cannot replay across a forget boundary, and restoration needs
-the exact current tombstone event ID. This is not exposed as a user command
-until the full inspect/forget/restore flow is designed. A v1 database receives
+The storage adapter also has a revision-bound preference tombstone operation.
+`--clear-preferred-app` asks for exact `CLEAR` confirmation and revokes only the
+currently observed preference revision. It preserves an audit record rather
+than claiming physical erasure; ordinary saves cannot replay across a forget
+boundary. A later `--remember-preferred-app` asks for `SAVE` and restores from
+the exact current tombstone event ID. A v1 database receives
 a verified SQLite-consistent backup at a fixed sibling path before migration
 to v2; an existing backup or failed backup blocks that upgrade.
 

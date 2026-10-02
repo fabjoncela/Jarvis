@@ -8,12 +8,17 @@ one user-confirmed fixed pre-match handoff for FACEIT AC, Chrome, and CS2:
 - a serialized supervisor foundation with one explicit resident monitor as the
   policy owner and owner of the internal-worker Job Object;
 - a fixed same-user control pipe for authoritative status, the confirmed
-  pre-match handoff, and the internal-worker containment check;
+  pre-match handoff, the internal-worker containment check, and bounded
+  preferred-app memory commands;
 - an explicit stdin supervisor loop for repeated validation requests, with a
   fixed `status | route <command> | quit` protocol;
 - strict, all-or-nothing TOML configuration validation;
 - typed, allowlisted action plans;
 - deterministic alias and volume-pattern routing;
+- bounded RAM-only session-context and result-verification contracts (not yet
+  wired to live action execution);
+- a private SQLite store for explicit preferred-app memory, revision-bound
+  clear/restore, and backup before an existing database migration;
 - competitive-mode policy logic with testable in-memory worker lifecycles;
 - a fixed manifest for the checked-in `jarvis-session-worker.exe` binary, with
   a containment self-check that starts it suspended, assigns and verifies its
@@ -72,10 +77,12 @@ cargo run -p jarvis -- --monitor-competitive
 
 In another terminal, `--supervisor-status` queries the resident owner's current
 profile and latest fixed-trigger snapshot. The pipe is local, owner-only,
-rejects remote clients, permits only three fixed request types, and accepts a
+rejects remote clients, permits only fixed typed request forms, and accepts a
 client only when its executable path matches the Jarvis server executable. A
 second monitor cannot claim the same endpoint. If the resident process exits,
-clients cannot claim that protection is active.
+clients cannot claim that protection is active. Run clients from the same
+binary path as the monitor; an isolated build and `cargo run` from the default
+target are different identities and cannot talk to each other.
 
 For opt-in timing diagnostics, start the monitor with
 `--monitor-competitive --diagnostics`; it reports monotonic reconciliation
@@ -105,14 +112,16 @@ Jarvis's own gates and stop only workers owned by that supervisor; it never
 starts, stops, or modifies a game, FACEIT component, or Windows service.
 
 The monitor takes an immediate startup snapshot, then polls the fixed CS2
-process, FACEIT
-Anti-Cheat Launcher process, and `FACEITService` every 500 ms. Setup signatures
+process, FACEIT Anti-Cheat Launcher process, and `FACEITService` every 500 ms.
+It attempts fixed-scope lifecycle notifications where permissions allow; WMI
+access is denied for the current account, so this workstation uses the
+authoritative polling fallback. Setup signatures
 and the fixed installation are rechecked every 30 seconds (every 5 seconds
 while unverified). Unknown identities or failed observations are unhealthy
 and keep Competitive Mode restricted. God Mode is restored only after a
 healthy snapshot confirms all fixed triggers are inactive. This is an opt-in
-console process, not an installed Windows service, OS event subscription, or
-automatic startup monitor. It is the sole authority for the current Windows
+process, not an installed Windows service or automatic startup monitor. It is
+the sole authority for the current Windows
 account while running; supported worker-start and pre-match clients
 consult it over the fixed control pipe. The polling policy and Job Object end
 when the process exits. Other Windows accounts are unsupported by this
@@ -135,6 +144,15 @@ the registered `FACEITService` binary, and Steam's local CS2 app-730 manifest.
 The handoff repeats this verification before every launch step. A successful
 check is not FACEIT approval or a reusable permission.
 
-Runtime data will eventually live under `%LOCALAPPDATA%\Jarvis`, never in the
+In stable God Mode, `--remember-preferred-app chrome` or `discord` asks for an
+exact `SAVE` confirmation. `--show-preferred-app` displays the active value.
+`--clear-preferred-app` asks for exact `CLEAR` and revokes only the value the
+client just observed. A later confirmed save restores it using the current
+tombstone revision, so a delayed old request cannot bring it back. Clearing
+does not physically erase the local audit history. These preferences do not
+change routing or launch any application. The resident supervisor owns all
+storage access, and Competitive Mode closes the memory gate.
+
+Runtime data lives under `%LOCALAPPDATA%\Jarvis`, never in the
 repository. Model files, recordings, credentials, and live databases must not
 be committed.
