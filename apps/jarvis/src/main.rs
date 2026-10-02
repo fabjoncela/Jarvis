@@ -4,7 +4,7 @@
 //!
 //! `--serve-stdin` keeps one serialized supervisor alive for explicitly typed
 //! status and route requests. `--monitor-competitive` is the opt-in fixed-scope
-//! process/service poller; the pre-match and Discord commands are the only
+//! process/service poller; pre-match, Discord, and Chrome are the only
 //! user-app launchers.
 
 mod supervisor;
@@ -57,6 +57,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
+        [flag] if flag == "--open-chrome" => return open_chrome(),
         [flag] if flag == "--discord-status" => return discord_status(),
         [flag] if flag == "--volume-status" => return volume_status(),
         [flag, percent] if flag == "--set-volume" => return set_volume_cli(percent),
@@ -100,7 +101,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --feedback-last-discord <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --open-chrome | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --feedback-last-discord <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -161,7 +162,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "execution: only the resident owner can run fixed pre-match or Discord launch commands; this self-check performed no application launch"
+        "execution: only the resident owner can run fixed pre-match, Discord/Chrome launch, or bounded volume commands; this self-check performed no desktop action"
     )
     .map_err(io_error)?;
     Ok(())
@@ -680,6 +681,22 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 }
             }
         }
+        SupervisorControlCommand::OpenChrome => {
+            if !status.action_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            match supervisor.open_chrome() {
+                Ok(request) => {
+                    let _ = monitor_cycle(supervisor, detector, last_report)?;
+                    Ok(format!("OK CHROME_LAUNCH_REQUESTED REQUEST={request} OUTCOME=UNVERIFIED"))
+                }
+                Err(error) => {
+                    eprintln!("authoritative Chrome launch denied or failed: {error}");
+                    let _ = monitor_cycle(supervisor, detector, last_report)?;
+                    Ok("ERR CHROME_LAUNCH".to_owned())
+                }
+            }
+        }
         SupervisorControlCommand::DiscordStatus => {
             if !status.action_gate_open {
                 return Ok("ERR POLICY".to_owned());
@@ -990,6 +1007,23 @@ fn open_discord() -> Result<(), String> {
     Ok(())
 }
 
+fn open_chrome() -> Result<(), String> {
+    let response = send_supervisor_control_request(SupervisorControlCommand::OpenChrome)
+        .map_err(|error| format!("authoritative supervisor unavailable ({error})"))?;
+    if !response.starts_with("OK CHROME_LAUNCH_REQUESTED ") {
+        return Err(match response.as_str() {
+            "ERR POLICY" => "Chrome launch denied by the authoritative profile policy".to_owned(),
+            "ERR CHROME_LAUNCH" => {
+                "Chrome could not be started; check the monitor console".to_owned()
+            }
+            _ => "authoritative supervisor returned an invalid Chrome response".to_owned(),
+        });
+    }
+    println!("{response}");
+    println!("Launch request accepted; no page, window, or login state was verified.");
+    Ok(())
+}
+
 fn feedback_discord(reference: &str, kind: &str) -> Result<(), String> {
     if reference.len() != 32
         || !reference
@@ -1139,6 +1173,14 @@ fn executable_route(
         {
             Ok(SupervisorControlCommand::OpenDiscord)
         }
+        RouteResult::Plan(plan)
+            if matches!(
+                plan.actions.as_slice(),
+                [Action::LaunchApplication { application_id }] if application_id == "chrome"
+            ) =>
+        {
+            Ok(SupervisorControlCommand::OpenChrome)
+        }
         RouteResult::Plan(plan) if matches!(plan.actions.as_slice(), [Action::SetMasterVolume { .. }]) => {
             let [Action::SetMasterVolume { percent }] = plan.actions.as_slice() else {
                 unreachable!("guard ensures one volume action")
@@ -1154,6 +1196,7 @@ fn executable_route(
 fn execute_text_command(utterance: &str, configuration_directory: &Path) -> Result<(), String> {
     match executable_route(utterance, configuration_directory)? {
         SupervisorControlCommand::OpenDiscord => open_discord(),
+        SupervisorControlCommand::OpenChrome => open_chrome(),
         SupervisorControlCommand::SetMasterVolume { percent } => {
             set_volume_cli(&percent.to_string())
         }
@@ -1716,6 +1759,10 @@ mod tests {
             );
         }
         assert_eq!(
+            executable_route("Jarvis, open Chrome", &configuration),
+            Ok(SupervisorControlCommand::OpenChrome)
+        );
+        assert_eq!(
             executable_route("set volume to 50", &configuration),
             Ok(SupervisorControlCommand::SetMasterVolume { percent: 50 })
         );
@@ -1723,7 +1770,6 @@ mod tests {
             "open cs2",
             "prepare faceit cs2",
             "set volume to 101",
-            "open chrome",
             "run powershell",
             "",
         ] {

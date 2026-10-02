@@ -98,6 +98,7 @@ pub enum SupervisorControlCommand {
     Status,
     LastHandoff,
     OpenDiscord,
+    OpenChrome,
     DiscordStatus,
     MasterVolumeStatus,
     SetMasterVolume {
@@ -138,6 +139,7 @@ impl SupervisorControlCommand {
             Self::Status => b"JARVIS/1 STATUS".to_vec(),
             Self::LastHandoff => b"JARVIS/1 LAST_HANDOFF".to_vec(),
             Self::OpenDiscord => b"JARVIS/1 OPEN_DISCORD".to_vec(),
+            Self::OpenChrome => b"JARVIS/1 OPEN_CHROME".to_vec(),
             Self::DiscordStatus => b"JARVIS/1 DISCORD_STATUS".to_vec(),
             Self::MasterVolumeStatus => b"JARVIS/1 MASTER_VOLUME_STATUS".to_vec(),
             Self::SetMasterVolume { percent } =>
@@ -174,6 +176,7 @@ impl SupervisorControlCommand {
             b"JARVIS/1 STATUS" => Some(Self::Status),
             b"JARVIS/1 LAST_HANDOFF" => Some(Self::LastHandoff),
             b"JARVIS/1 OPEN_DISCORD" => Some(Self::OpenDiscord),
+            b"JARVIS/1 OPEN_CHROME" => Some(Self::OpenChrome),
             b"JARVIS/1 DISCORD_STATUS" => Some(Self::DiscordStatus),
             b"JARVIS/1 MASTER_VOLUME_STATUS" => Some(Self::MasterVolumeStatus),
             b"JARVIS/1 PREPARE_FACEIT_CS2" => Some(Self::PrepareFaceitCs2),
@@ -844,6 +847,10 @@ mod tests {
         assert_eq!(
             SupervisorControlCommand::parse(&SupervisorControlCommand::LastHandoff.wire()),
             Some(SupervisorControlCommand::LastHandoff)
+        );
+        assert_eq!(
+            SupervisorControlCommand::parse(&SupervisorControlCommand::OpenChrome.wire()),
+            Some(SupervisorControlCommand::OpenChrome)
         );
         assert_eq!(
             SupervisorControlCommand::parse(&SupervisorControlCommand::OpenDiscord.wire()),

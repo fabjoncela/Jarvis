@@ -1,13 +1,13 @@
-# These are identifiers only. No application is launched by the current scaffold.
+# These are registry identifiers. Only separately reviewed capabilities can
+# launch a configured application; an alias alone grants no execution.
 [apps.cs2]
 type = "steam"
 appid = 730
 aliases = ["cs", "cs2", "counter", "counter strike", "counter strike 2"]
 protected_from_cleanup = true
 
-# These identifiers describe the fixed pre-match handoff only. Their actual
-# executable identities remain local runtime setup data and must be verified
-# before a future executor can use them.
+# FACEIT Anti-Cheat remains a fixed pre-match handoff identifier only. Chrome
+# also has a separate reviewed launcher with no URL or caller arguments.
 [apps.faceit_anticheat]
 type = "configured_executable"
 path_id = "verified_faceit_anticheat_install"
@@ -17,7 +17,7 @@ protected_from_cleanup = true
 [apps.chrome]
 type = "configured_executable"
 path_id = "verified_chrome_install"
-aliases = []
+aliases = ["chrome"]
 protected_from_cleanup = true
 
 [apps.discord]

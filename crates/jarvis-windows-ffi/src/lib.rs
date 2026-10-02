@@ -489,6 +489,12 @@ pub struct VerifiedDiscordLauncher {
     executable: PathBuf,
 }
 
+/// One-use identity for the fixed signed Chrome launcher, without a URL or
+/// caller-selected arguments. Profile admission remains the supervisor's job.
+pub struct VerifiedChromeLauncher {
+    executable: PathBuf,
+}
+
 #[derive(Debug)]
 pub enum DiscordProcessObservationError {
     Setup(PreMatchSetupError),
@@ -530,6 +536,30 @@ impl VerifiedDiscordLauncher {
     pub fn start(self) -> Result<(), Win32Error> {
         start_fixed_process(&self.executable, "Discord.exe")
     }
+}
+
+impl VerifiedChromeLauncher {
+    /// Successful return means CreateProcess accepted the request, not that
+    /// a Chrome window or page is ready.
+    pub fn start(self) -> Result<(), Win32Error> {
+        start_fixed_process(&self.executable, "chrome.exe")
+    }
+}
+
+/// Resolves the exact Program Files Chrome installation and checks Windows
+/// trust on each request. Does not depend on FACEIT setup being present.
+pub fn verify_fixed_chrome_launcher() -> Result<VerifiedChromeLauncher, PreMatchSetupError> {
+    let program_files = required_directory("ProgramFiles")?;
+    let executable = fixed_regular_file(
+        &program_files
+            .join("Google")
+            .join("Chrome")
+            .join("Application"),
+        "chrome.exe",
+        "Chrome",
+    )?;
+    verify_trusted_signature(&executable, "Chrome")?;
+    Ok(VerifiedChromeLauncher { executable })
 }
 
 /// Resolves and trust-checks only the fixed Discord launcher under this

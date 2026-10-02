@@ -3,7 +3,7 @@
 Jarvis is an offline-first Windows desktop assistant written primarily in Rust.
 Its current V1 foundation has no general desktop-action executor. It includes
 one user-confirmed fixed pre-match handoff for FACEIT AC, Chrome, and CS2,
-plus one fixed Discord launcher and one typed master-volume action:
+plus fixed Discord/Chrome launchers and one typed master-volume action:
 
 - a profile/generation safety model, exercised through unit tests;
 - a serialized supervisor foundation with one explicit resident monitor as the
@@ -152,8 +152,14 @@ It is denied when Competitive Mode closes the action gate. The result is a
 launch request, not proof that Discord finished starting. The existing
 `--route "Jarvis, open Discord"` command remains validation-only.
 
+`--open-chrome` asks that same resident owner to start only the signed Chrome
+executable at the fixed Program Files location, with no URL or caller-supplied
+arguments. It is denied during Competitive Mode and reports launch dispatch,
+not proof of a ready browser window or page. It is separate from the
+confirmation-required FACEIT handoff and does not open `faceit.com` by itself.
+
 `--execute "Jarvis, open Discord"` uses the deterministic local router, but
-accepts only configured Discord aliases and `set volume to <0..100>` for
+accepts only configured Discord/Chrome aliases and `set volume to <0..100>` for
 execution. It sends only fixed typed requests to the resident owner; command
 text never enters the control pipe. All other routes—including CS2 and
 pre-match—are rejected without an effect. Run this client from the exact same executable

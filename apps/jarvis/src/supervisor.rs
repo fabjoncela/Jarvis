@@ -1,4 +1,4 @@
-//! Serialized supervisor foundation with fixed pre-match and Discord capabilities.
+//! Serialized supervisor foundation with fixed pre-match and narrow desktop capabilities.
 //!
 //! `Supervisor` is the sole owner of profile state, configured routing, action
 //! validation, the fixed internal-worker manifest, and an owned Job Object.
@@ -29,10 +29,10 @@ use jarvis_verification::{
 };
 use jarvis_windows::{
     observe_fixed_discord_process_count, read_default_master_volume, run_pre_match_handoff,
-    set_default_master_volume, verify_fixed_discord_launcher, AudioEndpointError,
-    DiscordProcessObservationError, InternalWorker, PreMatchHandoffError, PreMatchHandoffReport,
-    PreMatchSetupError, Win32Error, WindowsWorkerManager, WorkerManagerError, WorkerManifest,
-    WorkerProcessIdentity, WorkerShutdownReport,
+    set_default_master_volume, verify_fixed_chrome_launcher, verify_fixed_discord_launcher,
+    AudioEndpointError, DiscordProcessObservationError, InternalWorker, PreMatchHandoffError,
+    PreMatchHandoffReport, PreMatchSetupError, Win32Error, WindowsWorkerManager,
+    WorkerManagerError, WorkerManifest, WorkerProcessIdentity, WorkerShutdownReport,
 };
 
 #[derive(Debug)]
@@ -96,6 +96,31 @@ pub enum DiscordLaunchRequestError {
     Setup(PreMatchSetupError),
     Launch(Win32Error),
 }
+
+#[derive(Debug)]
+pub enum ChromeLaunchRequestError {
+    Validation(ValidationError),
+    Authorization(GateError),
+    UnexpectedConfirmation,
+    Setup(PreMatchSetupError),
+    Launch(Win32Error),
+}
+
+impl fmt::Display for ChromeLaunchRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(error) => write!(formatter, "Chrome action rejected: {error:?}"),
+            Self::Authorization(error) => write!(formatter, "Chrome action denied: {error:?}"),
+            Self::UnexpectedConfirmation => {
+                formatter.write_str("Chrome action unexpectedly required confirmation")
+            }
+            Self::Setup(error) => error.fmt(formatter),
+            Self::Launch(error) => write!(formatter, "could not start Chrome: {error}"),
+        }
+    }
+}
+
+impl Error for ChromeLaunchRequestError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscordFeedbackError {
@@ -312,7 +337,7 @@ pub enum RouteOutcome {
 ///
 /// All request admission takes `&mut self`, keeping policy and monitor
 /// reconciliation serialized. External application capabilities are limited
-/// to the explicit fixed pre-match handoff and fixed Discord launcher.
+/// to the explicit fixed pre-match handoff and fixed Discord/Chrome launchers.
 pub struct Supervisor {
     configuration: ValidatedConfiguration,
     controller: ProfileController,
@@ -553,6 +578,19 @@ impl Supervisor {
         Ok((request.request_id, reference))
     }
 
+    /// Launches only the fixed signed Chrome installation without a URL or
+    /// caller-provided arguments. This is separate from the pre-match handoff.
+    pub fn open_chrome(&mut self) -> Result<RequestId, ChromeLaunchRequestError> {
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.authorize_chrome_request(request)?;
+        let launcher = verify_fixed_chrome_launcher().map_err(ChromeLaunchRequestError::Setup)?;
+        self.controller
+            .authorize_action(request)
+            .map_err(ChromeLaunchRequestError::Authorization)?;
+        launcher.start().map_err(ChromeLaunchRequestError::Launch)?;
+        Ok(request.request_id)
+    }
+
     fn record_discord_dispatch(&mut self, request: RequestContext) -> u128 {
         let now = Instant::now();
         let execution = ExecutionId::next();
@@ -711,6 +749,28 @@ impl Supervisor {
             .authorize_action(request)
             .map_err(DiscordLaunchRequestError::Authorization)?;
         Ok(())
+    }
+
+    fn authorize_chrome_request(
+        &self,
+        request: RequestContext,
+    ) -> Result<(), ChromeLaunchRequestError> {
+        let validated = self
+            .registry
+            .validate(
+                ActionPlan::single(Action::LaunchApplication {
+                    application_id: "chrome".to_owned(),
+                }),
+                request,
+                &self.controller,
+            )
+            .map_err(ChromeLaunchRequestError::Validation)?;
+        if validated.requires_confirmation() {
+            return Err(ChromeLaunchRequestError::UnexpectedConfirmation);
+        }
+        self.controller
+            .authorize_action(request)
+            .map_err(ChromeLaunchRequestError::Authorization)
     }
 
     /// Starts one fixed internal worker only after the current profile gate
@@ -1101,6 +1161,28 @@ mod tests {
             supervisor.open_discord(),
             Err(DiscordLaunchRequestError::Validation(
                 ValidationError::ProfileGate(GateError::ProfileRestricted)
+            ))
+        ));
+    }
+
+    #[test]
+    fn chrome_launch_is_denied_before_native_setup_and_stale_replay() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let old = RequestContext::new(RequestId::next(), supervisor.controller.generation());
+        assert!(supervisor.authorize_chrome_request(old).is_ok());
+        supervisor
+            .enter_competitive(TransitionCause::Cs2Process)
+            .unwrap();
+        assert!(matches!(
+            supervisor.open_chrome(),
+            Err(ChromeLaunchRequestError::Validation(
+                ValidationError::ProfileGate(GateError::ProfileRestricted)
+            ))
+        ));
+        assert!(matches!(
+            supervisor.authorize_chrome_request(old),
+            Err(ChromeLaunchRequestError::Validation(
+                ValidationError::ProfileGate(GateError::StaleGeneration)
             ))
         ));
     }

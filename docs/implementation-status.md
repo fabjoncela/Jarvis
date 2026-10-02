@@ -19,7 +19,7 @@ pre-match launch sequence, not a running desktop assistant:
    collisions, and external cleanup targets. It does not certify FACEIT
    compatibility or a local FACEIT identity.
 5. `jarvis-actions` accepts only typed, configured plans. There is no general
-   action executor; the pre-match capability and fixed Discord launcher have
+   action executor; the pre-match capability and fixed Discord/Chrome launchers have
    separate supervisor-owned paths.
 6. `jarvis-router` performs conservative normalization, config-derived exact
    aliases, and a bounded `set volume to <0..100>` pattern.
@@ -142,6 +142,24 @@ pre-match launch sequence, not a running desktop assistant:
     its 15-second ambiguity window are rejected, as are expired or
     generation-invalidated anchors. The reference-bearing feedback command
     remains available for exact selection. Neither path verifies success.
+24. `--open-chrome` and configured `--execute "open chrome"` route to a separate
+    fixed supervisor-owned Chrome launcher. It resolves only the Program Files
+    Chrome image, verifies Windows trust, and passes no URL or caller
+    arguments. The profile and generation gates are checked before launch;
+    tests cover Competitive denial and stale request rejection. The new
+    Chrome command was smoke-tested through the resident monitor on this PC;
+    it does not replace the confirmed FACEIT pre-match handoff.
+
+## Fixed Chrome launch smoke result (3 October 2026)
+
+The matching isolated build at `target\v1-chrome\debug\jarvis.exe` passed a
+self-check and was started as the resident monitor only after the previous
+monitor reported healthy stable God Mode with all fixed CS2/FACEIT triggers
+inactive. The new monitor reported the same state. One `--open-chrome` request
+returned `CHROME_LAUNCH_REQUESTED`; 19 Chrome processes were present afterward,
+but no before count or window check was taken, so the process count cannot be
+attributed to that request. No URL, credentials, game, FACEIT component, or
+service was launched by this Chrome command.
 
 ## Read-only volume smoke result (3 October 2026)
 
@@ -165,7 +183,7 @@ changed. The `--set-volume` write path remains untested on the live endpoint.
   automatically.
 - general desktop application, browser, file, service, or system action
   execution; only the fixed confirmation-gated pre-match sequence and the
-  fixed Discord command can currently launch user applications, while the
+  fixed Discord/Chrome commands can currently launch user applications, while the
   one bounded volume action affects the default output endpoint
 - general-purpose memory/feedback commands or a learning pipeline, general-purpose IPC, tray
   UI, microphone, STT, TTS, Qwen, or learning workers

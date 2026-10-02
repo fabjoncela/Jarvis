@@ -82,6 +82,10 @@ resident owner, then starts only the fixed signed launcher under Local AppData.
 It cannot accept a path or arguments. A successful CreateProcess return is
 reported as dispatch, not verified application readiness. It is never
 available while Competitive Mode closes the action gate.
+The separate `--open-chrome` path validates its registered action and starts
+only the trust-checked fixed Program Files Chrome image, without a URL or
+caller arguments. It is not an alternative to the confirmed pre-match flow,
+and its launch receipt does not verify browser readiness.
 The second narrow action is `SetMasterVolume` for an integer 0–100, sent as a
 fixed typed resident request. The owner repeats validation and generation
 admission before Windows Core Audio changes the current default console
@@ -90,7 +94,7 @@ reported separately from audible success. Competitive Mode denies the action.
 `--volume-status` is a separate on-demand, read-only observation through the
 same fixed endpoint and profile gate; it does not execute a volume change.
 The `--execute <text>` CLI reuses the conservative local router, but converts
-only configured Discord aliases and the bounded volume pattern to fixed pipe
+only configured Discord/Chrome aliases and the bounded volume pattern to fixed pipe
 commands. It cannot
 send arbitrary text or a new executable path to the owner. Other routed plans
 remain previews or use their separate explicit workflow; `--route` is still

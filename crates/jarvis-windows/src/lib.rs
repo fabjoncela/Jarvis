@@ -24,14 +24,14 @@ use jarvis_windows_ffi::{
 pub use jarvis_windows_ffi::{
     observe_competitive_activity, observe_cs2_processes, observe_fixed_discord_process_count,
     read_default_master_volume, send_supervisor_control_request, set_default_master_volume,
-    verify_default_pre_match_setup, verify_fixed_discord_launcher, AudioEndpointError,
-    CompetitiveActivityObservationError, CompetitiveActivitySnapshot,
+    verify_default_pre_match_setup, verify_fixed_chrome_launcher, verify_fixed_discord_launcher,
+    AudioEndpointError, CompetitiveActivityObservationError, CompetitiveActivitySnapshot,
     CompetitiveLifecycleNotifications, DiscordFeedback, DiscordProcessObservationError,
     FixedCompetitiveProcess, LifecycleNotificationFailure, ObservedProcessIdentity,
     PreMatchLaunchError, PreMatchLaunchStep, PreMatchSetupError, PreferredApp,
     ProcessObservationError, SupervisorControlCommand, SupervisorControlPipeError,
-    SupervisorControlPipeServer, VerifiedDiscordLauncher, VerifiedPreMatchSetup, Win32Error,
-    WorkerLaunchError,
+    SupervisorControlPipeServer, VerifiedChromeLauncher, VerifiedDiscordLauncher,
+    VerifiedPreMatchSetup, Win32Error, WorkerLaunchError,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
