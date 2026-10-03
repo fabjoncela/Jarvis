@@ -164,7 +164,8 @@ most 4,096 bytes of strict versioned JSON with the matching anchor
 from an untrusted future local model. It admits only no-action, fixed
 Discord/Chrome launch IDs, or bounded master volume, and returns no execution
 authority by itself. Its admission API rechecks the live profile generation
-and action registry; every eventual side effect still needs a fresh supervisor
+and action registry, and rejects canceled or 30-second-expired pending
+requests; every eventual side effect still needs a fresh supervisor
 gate check. There is no model runtime or model-driven execution path yet.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,

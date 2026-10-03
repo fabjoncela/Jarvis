@@ -156,8 +156,10 @@ pre-match launch sequence, not a running desktop assistant:
     JSON, trailing output, and mismatched request/profile-generation echoes
     fail closed. It also encodes one ephemeral utterance of at most 1,024 bytes
     with a fixed capability list and no stored context. Its admission function
-    rechecks the live Rust profile and action registry. It does not start a model, dispatch
-    an action, or bypass the resident supervisor's live generation/profile and
+    rechecks the live Rust profile and action registry. A supervisor-owned
+    30-second pending request also rejects canceled or expired replies, even
+    without a profile change. It does not start a model, dispatch an action,
+    or bypass the resident supervisor's live generation/profile and
     registry checks.
 26. A second fixed `jarvis-model-worker.exe` identity is in the worker
     manifest and FFI allowlist. The binary currently only waits for its

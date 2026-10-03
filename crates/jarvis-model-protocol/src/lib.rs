@@ -5,13 +5,15 @@
 //! generation, and action registry before any side effect.
 
 use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, ValidationError};
-use jarvis_core::RequestContext;
+use jarvis_core::{CancellationToken, RequestContext};
 use jarvis_profiles::ProfileController;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 pub const MODEL_PROPOSAL_SCHEMA_VERSION: u16 = 1;
 pub const MAX_MODEL_RESPONSE_BYTES: usize = 4096;
 pub const MAX_MODEL_UTTERANCE_BYTES: usize = 1024;
+pub const MODEL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
 const ALLOWED_ACTIONS: [&str; 3] = [
     "launch_application:discord",
     "launch_application:chrome",
@@ -84,12 +86,54 @@ pub enum ProposalError {
 pub enum AdmissionError {
     Protocol(ProposalError),
     Policy(ValidationError),
+    Cancelled,
+    Expired,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ModelAdmission {
     NoAction,
     Validated(ValidatedPlan),
+}
+
+/// Trusted supervisor-owned one-request admission window. Clones share the
+/// cancellation signal; neither a model response nor worker JSON can create
+/// or extend this deadline.
+#[derive(Clone, Debug)]
+pub struct PendingModelRequest {
+    request: RequestContext,
+    deadline: Instant,
+    cancellation: CancellationToken,
+}
+
+impl PendingModelRequest {
+    #[must_use]
+    pub fn new(request: RequestContext, started_at: Instant) -> Self {
+        Self {
+            request,
+            deadline: started_at + MODEL_REPLY_DEADLINE,
+            cancellation: CancellationToken::default(),
+        }
+    }
+
+    #[must_use]
+    pub const fn request(&self) -> RequestContext {
+        self.request
+    }
+
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn check_live(&self, now: Instant) -> Result<(), AdmissionError> {
+        if self.cancellation.is_cancelled() {
+            return Err(AdmissionError::Cancelled);
+        }
+        if now >= self.deadline {
+            return Err(AdmissionError::Expired);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -162,22 +206,27 @@ pub fn parse_model_proposal(
 /// A caller must still reauthorize immediately before every later effect.
 pub fn admit_model_proposal(
     response: &[u8],
-    request: RequestContext,
+    pending: &PendingModelRequest,
+    now: Instant,
     registry: &ActionRegistry,
     profile: &ProfileController,
 ) -> Result<ModelAdmission, AdmissionError> {
+    pending.check_live(now)?;
     // Even an abstention is not accepted across a profile generation change.
     profile
-        .authorize_action(request)
+        .authorize_action(pending.request)
         .map_err(ValidationError::ProfileGate)
         .map_err(AdmissionError::Policy)?;
-    match parse_model_proposal(response, request).map_err(AdmissionError::Protocol)? {
-        ModelProposal::NoAction => Ok(ModelAdmission::NoAction),
-        ModelProposal::Candidate { request, plan } => registry
-            .validate(plan, request, profile)
-            .map(ModelAdmission::Validated)
-            .map_err(AdmissionError::Policy),
-    }
+    let admitted =
+        match parse_model_proposal(response, pending.request).map_err(AdmissionError::Protocol)? {
+            ModelProposal::NoAction => Ok(ModelAdmission::NoAction),
+            ModelProposal::Candidate { request, plan } => registry
+                .validate(plan, request, profile)
+                .map(ModelAdmission::Validated)
+                .map_err(AdmissionError::Policy),
+        }?;
+    pending.check_live(now)?;
+    Ok(admitted)
 }
 
 #[cfg(test)]
@@ -368,12 +417,15 @@ mod tests {
         let registry = ActionRegistry::new(["discord"], ["cs2"]);
         let mut profile = ProfileController::new();
         let stale_request = request(&profile);
+        let started_at = Instant::now();
+        let pending = PendingModelRequest::new(stale_request, started_at);
+        let now = started_at + Duration::from_secs(1);
         let candidate = stamped(
             r#"{"schema_version":1,"action":{"type":"launch_application","application_id":"chrome"}}"#,
             stale_request,
         );
         assert_eq!(
-            admit_model_proposal(candidate.as_bytes(), stale_request, &registry, &profile),
+            admit_model_proposal(candidate.as_bytes(), &pending, now, &registry, &profile),
             Err(AdmissionError::Policy(
                 ValidationError::UnregisteredApplication("chrome".to_owned())
             ))
@@ -381,7 +433,8 @@ mod tests {
         let allowed_registry = ActionRegistry::new(["discord", "chrome"], ["cs2"]);
         let admitted = admit_model_proposal(
             candidate.as_bytes(),
-            stale_request,
+            &pending,
+            now,
             &allowed_registry,
             &profile,
         )
@@ -394,7 +447,8 @@ mod tests {
                     stale_request,
                 )
                 .as_bytes(),
-                stale_request,
+                &pending,
+                now,
                 &registry,
                 &profile,
             ),
@@ -402,7 +456,7 @@ mod tests {
         );
         profile.enter_competitive(TransitionCause::Cs2Process);
         assert_eq!(
-            admit_model_proposal(candidate.as_bytes(), stale_request, &registry, &profile),
+            admit_model_proposal(candidate.as_bytes(), &pending, now, &registry, &profile),
             Err(AdmissionError::Policy(ValidationError::ProfileGate(
                 GateError::StaleGeneration
             )))
@@ -414,11 +468,47 @@ mod tests {
                     request(&profile),
                 )
                 .as_bytes(),
-                request(&profile),
+                &PendingModelRequest::new(request(&profile), started_at),
+                now,
                 &registry,
                 &profile,
             ),
             Err(AdmissionError::Policy(ValidationError::ProfileGate(_)))
         ));
+    }
+
+    #[test]
+    fn cancelled_or_expired_pending_request_cannot_admit_a_reply() {
+        let profile = ProfileController::new();
+        let request = request(&profile);
+        let started_at = Instant::now();
+        let pending = PendingModelRequest::new(request, started_at);
+        let response = stamped(
+            r#"{"schema_version":1,"action":{"type":"no_action"}}"#,
+            request,
+        );
+        let registry = ActionRegistry::new(["discord"], ["cs2"]);
+        assert_eq!(
+            admit_model_proposal(
+                response.as_bytes(),
+                &pending,
+                started_at + MODEL_REPLY_DEADLINE,
+                &registry,
+                &profile,
+            ),
+            Err(AdmissionError::Expired)
+        );
+        let second_handle = pending.clone();
+        second_handle.cancel();
+        assert_eq!(
+            admit_model_proposal(
+                response.as_bytes(),
+                &pending,
+                started_at + Duration::from_secs(1),
+                &registry,
+                &profile,
+            ),
+            Err(AdmissionError::Cancelled)
+        );
     }
 }

@@ -24,6 +24,8 @@ The future response must be one complete JSON value, for example:
 
 The request ID and generation are examples, not reusable values. The worker
 must echo the actual values from the bounded request; a mismatch is denied.
+Pending requests expire after 30 seconds and can be canceled; neither a model
+reply nor worker JSON can extend the deadline.
 The capability list advertises only `launch_application:discord`,
 `launch_application:chrome`, and `set_master_volume`. `no_action` is also
 valid. This schema does not grant execution authority.
