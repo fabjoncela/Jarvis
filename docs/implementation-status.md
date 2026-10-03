@@ -168,7 +168,8 @@ pre-match launch sequence, not a running desktop assistant:
     invalid patterns cannot fall through to it. Only one pending request is
     retained; response admission is one-shot and validation-only. Competitive
     entry cancels it before owned-worker shutdown. No request is sent to a
-    model yet.
+    model yet. Unknown text explicitly naming FACEIT, CS2, or Anti-Cheat is
+    denied at this fallback gate and needs a reviewed explicit workflow.
     A separate one-slot, 4,096-byte reply mailbox lets a future blocking I/O
     task submit without waiting; the supervisor polls it without waiting and
     applies the same one-shot admission. Tests reject a queued reply after

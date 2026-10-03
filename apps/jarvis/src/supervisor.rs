@@ -342,6 +342,7 @@ pub enum ModelRequestError {
     ProfileGate(GateError),
     KnownDeterministicRoute,
     InvalidDeterministicPattern,
+    ProtectedTopicRequiresExplicitWorkflow,
     Protocol(RequestError),
 }
 
@@ -551,6 +552,17 @@ impl Supervisor {
                 return Err(ModelRequestError::InvalidDeterministicPattern);
             }
             RouteResult::Unknown => {}
+        }
+        if command
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| {
+                matches!(
+                    token.to_ascii_lowercase().as_str(),
+                    "faceit" | "cs2" | "anticheat"
+                )
+            })
+        {
+            return Err(ModelRequestError::ProtectedTopicRequiresExplicitWorkflow);
         }
         let request = RequestContext::new(RequestId::next(), self.controller.generation());
         self.controller
@@ -1222,6 +1234,12 @@ mod tests {
             supervisor.begin_model_request("set volume to 101"),
             Err(ModelRequestError::InvalidDeterministicPattern)
         );
+        for protected in ["open faceit", "visit faceit.com", "start CS2 again"] {
+            assert_eq!(
+                supervisor.begin_model_request(protected),
+                Err(ModelRequestError::ProtectedTopicRequiresExplicitWorkflow)
+            );
+        }
         let encoded = supervisor.begin_model_request("what can you do?").unwrap();
         let request: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(request["utterance"], "what can you do?");
