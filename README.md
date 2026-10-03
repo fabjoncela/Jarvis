@@ -22,14 +22,18 @@ plus fixed Discord/Chrome launchers and one typed master-volume action:
 - a private SQLite store for explicit preferred-app memory, revision-bound
   clear/restore, and backup before an existing database migration;
 - competitive-mode policy logic with testable in-memory worker lifecycles;
-- a fixed manifest for the checked-in `jarvis-session-worker.exe` binary, with
-  a containment self-check that starts it suspended, assigns and verifies its
-  Job Object membership, then resumes it; it also verifies a bounded
-  cooperative exit and a safe restart after the Job Object is empty.
+- a fixed two-entry manifest for the checked-in session and model worker
+  binaries, each with a containment self-check that starts it suspended,
+  assigns and verifies its Job Object membership, then resumes it; each check
+  verifies a bounded cooperative exit and safe restart after the Job Object is
+  empty;
+- a bounded, versioned model-request/proposal protocol with a one-slot reply
+  mailbox. This is an inert safety boundary: no model runtime or worker IPC is
+  connected to it yet.
 
 No microphone capture, model loading, or game interaction is active in this
-scaffold. There is no installed Windows service, automatic startup, general
-multi-worker lifecycle, or arbitrary desktop action executor. The explicit
+scaffold. There is no installed Windows service, automatic startup, model
+inference, or arbitrary desktop action executor. The explicit
 `--monitor-competitive` process owns resident policy and monitors only the fixed
 CS2/FACEIT triggers described below. Commands that start an internal worker or
 launch the fixed pre-match sequence or Discord require that owner; they fail closed when it
@@ -61,10 +65,11 @@ cd C:\Users\Admin\Documents\Jarvis
 cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo build -p jarvis-session-worker
+cargo build
 cargo run -p jarvis -- --self-check
 cargo run -p jarvis -- --competitive-self-check
 cargo run -p jarvis -- --detection-self-check
+cargo run -p jarvis -- --model-worker-self-check
 cargo run -p jarvis -- --pre-match-setup-self-check
 cargo run -p jarvis -- --route "Jarvis, open Discord"
 cargo run -p jarvis -- --serve-stdin
@@ -72,7 +77,7 @@ cargo run -p jarvis -- --serve-stdin
 
 `--self-check` validates the fixed configuration bundle and initializes a
 serialized supervisor for that validation command. It owns an empty unnamed
-Jarvis Job Object and a one-entry internal worker manifest, but does not start
+Jarvis Job Object and a two-entry internal worker manifest, but does not start
 a process monitor or worker. The standalone local setup check is separate and
 does not certify compatibility.
 
@@ -111,6 +116,12 @@ restart readiness. A 500 ms bound precedes a Job-Object-only forced-termination
 fallback. The request accepts no user-provided executable path, PID, or command
 line, and launches no configured desktop application.
 
+`--model-worker-self-check` applies the same owned containment and two-cycle
+restart check to the fixed `jarvis-model-worker.exe` beside the monitor binary.
+The model worker currently only waits for the owner's shutdown signal. It does
+not start Ollama, load Qwen, accept text over IPC, or execute an action. Build
+the complete workspace and use the same binary path for the monitor and client.
+
 `--competitive-self-check` enters Competitive Mode through the real owned
 worker manager and verifies the empty Job Object before reporting closed action
 and worker-start gates. `--detection-self-check` performs one fixed-identity
@@ -137,11 +148,13 @@ single-owner endpoint.
 `Jarvis, prepare FACEIT CS2` requests one fixed, confirmation-required
 **pre-match handoff** from the resident owner. Start the monitor first, run
 `--prepare-faceit-cs2`, and type `START` at its prompt. The owner starts the
-verified FACEIT Anti-Cheat Launcher (`faceitclient.exe`), opens
-`https://www.faceit.com/` in verified Chrome, then asks Steam to launch app 730
+verified FACEIT Anti-Cheat Launcher (`faceitclient.exe`), makes one best-effort
+check for a FACEIT-titled window owned by verified Chrome, and opens
+`https://www.faceit.com/` if it does not find one; then it asks Steam to launch app 730
 (CS2). It does not start `FACEITService` directly or type credentials. If a
 step fails, later steps are skipped; the monitor console records partial
-progress. The monitor serializes the sequence with profile updates, then
+progress. The window-title check cannot verify a URL or a background tab, so
+an uncertain or failed check opens the fixed URL. The monitor serializes the sequence with profile updates, then
 immediately reconciles the newly started FACEIT/CS2 triggers.
 
 `--last-handoff` reads the resident supervisor's most recent handoff attempt.
