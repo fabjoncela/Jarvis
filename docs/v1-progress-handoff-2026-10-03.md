@@ -4,8 +4,8 @@ Status: paused at the user's request. V1 is **not finished**.
 
 ## Repository and live state
 
-- Repository: `C:\Users\Admin\Documents\Jarvis`, branch `main`, clean working tree at `adf0873`.
-- Local branch is 36 commits ahead of `origin/main`; these commits have **not** been pushed.
+- Repository: `C:\Users\Admin\Documents\Jarvis`, branch `main`, clean working tree when this handoff was saved. The last code commit before this report was `adf0873`.
+- Local continuation commits, including this handoff, are ahead of `origin/main` and have **not** been pushed. Verify the exact ahead count with `git status` when resuming.
 - The resident monitor remains PID 30440 from `target\v1-model-check\debug\jarvis.exe`, an earlier matching build. Newer source changes are not deployed to it.
 - Last read-only resident status: stable Competitive Mode, both gates closed, `ActivityObservationUnavailable`, reported CS2/FACEIT launcher/FACEITService flags false because observation was unavailable. A separate read-only check earlier found FACEITService running and a FACEIT launcher process present. Do not interpret the false flags as an all-clear.
 - No game, FACEIT component, browser, audio setting, Ollama runtime, or model was started, stopped, or changed in this continuation. The resident monitor was not restarted while detection was unhealthy.
@@ -33,4 +33,4 @@ Status: paused at the user's request. V1 is **not finished**.
 3. Implement an authenticated, bounded worker-process transport on a separate I/O task, following `docs/model-worker-transport.md`. Prove worker crash, timeout, cancellation, late reply, and Competitive transition cases before connecting inference.
 4. Continue the broader V1 work: trusted machine verification, voice/wake/STT/Piper, on-demand local Qwen (optional small/main benchmark), versioned data skills/routines, and full acceptance tests. Do not call V1 complete until those work.
 
-No Git push was requested in this continuation; the 36 local commits remain unpushed.
+No Git push was requested in this continuation; the local commits remain unpushed.
