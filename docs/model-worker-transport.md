@@ -50,6 +50,10 @@ tests this lifecycle without IPC or inference.
   only by `finish`, which the transport must call at a verified pipe-message
   boundary, not merely when a byte count happens to match. It is not yet
   attached to a Windows pipe or an I/O thread.
+- The dormant in-process pump accepts at most one request and writes its reply
+  into a fixed 4,100-byte frame buffer. It rejects a transport-reported length
+  beyond that buffer before decoding or queuing a reply. This bounds the
+  supervisor-side exchange seam, but is not process IPC or model inference.
 - No user utterance, model output, pipe token, or credential is written to
   normal logs. Diagnostics may record byte counts, timings, outcome codes,
   and request IDs only.

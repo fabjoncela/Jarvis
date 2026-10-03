@@ -9,6 +9,10 @@ The dormant model fallback gate also rejects protected gaming topics, including
 separator variants of FACEIT, Anti-Cheat, and CS2 and requests naming Steam or
 Counter-Strike. This is a conservative routing rule, not an anti-cheat
 compatibility claim; no model inference or model-proposed action is running.
+The dormant model I/O pump uses a fixed-size response-frame buffer, rejects a
+transport length beyond it, and tests cancellation before and during an
+in-memory no-action exchange. It is not attached to the resident monitor or a
+Windows worker transport.
 
 1. `jarvis-core` creates request IDs, profile generations, and cancellation
    tokens.

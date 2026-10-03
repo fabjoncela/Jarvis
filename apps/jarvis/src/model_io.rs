@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use jarvis_model_protocol::{
     encode_frame, FrameDecoder, FrameError, FrameKind, ModelReplySender, ModelRequestReceiver,
-    QueuedPlanningRequest, ReplyMailboxError, RequestMailboxError,
+    QueuedPlanningRequest, ReplyMailboxError, RequestMailboxError, MAX_MODEL_RESPONSE_FRAME_BYTES,
 };
 
 pub trait ModelTransport {
@@ -19,7 +19,8 @@ pub trait ModelTransport {
         &mut self,
         request_frame: &[u8],
         request: &QueuedPlanningRequest,
-    ) -> Result<Vec<u8>, Self::Error>;
+        response_frame: &mut [u8; MAX_MODEL_RESPONSE_FRAME_BYTES],
+    ) -> Result<usize, Self::Error>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,8 +65,9 @@ pub fn pump_one<T: ModelTransport>(
     }
     let frame =
         encode_frame(FrameKind::Request, queued.bytes()).map_err(PumpError::RequestFrame)?;
-    let response_frame = transport
-        .exchange(&frame, &queued)
+    let mut response_frame = [0_u8; MAX_MODEL_RESPONSE_FRAME_BYTES];
+    let response_len = transport
+        .exchange(&frame, &queued, &mut response_frame)
         .map_err(PumpError::Transport)?;
     match queued.check_live(Instant::now()) {
         Ok(()) => {}
@@ -75,8 +77,11 @@ pub fn pump_one<T: ModelTransport>(
         Err(error) => return Err(PumpError::RequestMailbox(error)),
     }
     let mut decoder = FrameDecoder::new(FrameKind::Response);
+    if response_len > response_frame.len() {
+        return Err(PumpError::ReplyFrame(FrameError::TooLarge));
+    }
     decoder
-        .feed(&response_frame)
+        .feed(&response_frame[..response_len])
         .map_err(PumpError::ReplyFrame)?;
     let response = decoder.finish().map_err(PumpError::ReplyFrame)?;
     replies
@@ -102,9 +107,13 @@ mod tests {
             &mut self,
             request_frame: &[u8],
             request: &QueuedPlanningRequest,
-        ) -> Result<Vec<u8>, Self::Error> {
+            response_frame: &mut [u8; MAX_MODEL_RESPONSE_FRAME_BYTES],
+        ) -> Result<usize, Self::Error> {
             request.check_live(Instant::now()).unwrap();
-            jarvis_model_worker::handle_framed_request(request_frame)
+            let encoded = jarvis_model_worker::handle_framed_request(request_frame)?;
+            assert!(encoded.len() <= response_frame.len());
+            response_frame[..encoded.len()].copy_from_slice(&encoded);
+            Ok(encoded.len())
         }
     }
 
@@ -188,11 +197,14 @@ mod tests {
                 &mut self,
                 request_frame: &[u8],
                 _: &QueuedPlanningRequest,
-            ) -> Result<Vec<u8>, Self::Error> {
+                response_frame: &mut [u8; MAX_MODEL_RESPONSE_FRAME_BYTES],
+            ) -> Result<usize, Self::Error> {
                 self.0
                     .enter_competitive(TransitionCause::FaceitProcess)
                     .unwrap();
-                jarvis_model_worker::handle_framed_request(request_frame)
+                let encoded = jarvis_model_worker::handle_framed_request(request_frame)?;
+                response_frame[..encoded.len()].copy_from_slice(&encoded);
+                Ok(encoded.len())
             }
         }
 
@@ -226,12 +238,15 @@ mod tests {
                 &mut self,
                 _: &[u8],
                 _: &QueuedPlanningRequest,
-            ) -> Result<Vec<u8>, Self::Error> {
-                Ok([
+                response_frame: &mut [u8; MAX_MODEL_RESPONSE_FRAME_BYTES],
+            ) -> Result<usize, Self::Error> {
+                let encoded = [
                     encode_frame(FrameKind::Response, b"{}").unwrap(),
                     b"extra".to_vec(),
                 ]
-                .concat())
+                .concat();
+                response_frame[..encoded.len()].copy_from_slice(&encoded);
+                Ok(encoded.len())
             }
         }
 
@@ -249,6 +264,44 @@ mod tests {
                 Instant::now()
             ),
             Err(PumpError::ReplyFrame(FrameError::TrailingData))
+        ));
+        assert!(matches!(
+            supervisor.poll_model_reply(&reply_receiver),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn transport_cannot_claim_more_than_fixed_reply_buffer() {
+        struct OversizeLength;
+
+        impl ModelTransport for OversizeLength {
+            type Error = std::convert::Infallible;
+
+            fn exchange(
+                &mut self,
+                _: &[u8],
+                _: &QueuedPlanningRequest,
+                _: &mut [u8; MAX_MODEL_RESPONSE_FRAME_BYTES],
+            ) -> Result<usize, Self::Error> {
+                Ok(MAX_MODEL_RESPONSE_FRAME_BYTES + 1)
+            }
+        }
+
+        let mut supervisor = supervisor();
+        let (request_sender, request_receiver) = model_request_mailbox();
+        let (reply_sender, reply_receiver) = model_reply_mailbox();
+        supervisor
+            .queue_model_request("unknown task", &request_sender)
+            .unwrap();
+        assert!(matches!(
+            pump_one(
+                &request_receiver,
+                &reply_sender,
+                &mut OversizeLength,
+                Instant::now()
+            ),
+            Err(PumpError::ReplyFrame(FrameError::TooLarge))
         ));
         assert!(matches!(
             supervisor.poll_model_reply(&reply_receiver),

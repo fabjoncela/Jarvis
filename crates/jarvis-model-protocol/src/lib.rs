@@ -18,6 +18,8 @@ pub const MAX_MODEL_UTTERANCE_BYTES: usize = 1024;
 pub const MAX_MODEL_REQUEST_BYTES: usize = 2048;
 pub const MODEL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
 const FRAME_HEADER_BYTES: usize = 4;
+pub const MAX_MODEL_REQUEST_FRAME_BYTES: usize = FRAME_HEADER_BYTES + MAX_MODEL_REQUEST_BYTES;
+pub const MAX_MODEL_RESPONSE_FRAME_BYTES: usize = FRAME_HEADER_BYTES + MAX_MODEL_RESPONSE_BYTES;
 const ALLOWED_ACTIONS: [&str; 3] = [
     "launch_application:discord",
     "launch_application:chrome",
