@@ -15,7 +15,8 @@ use jarvis_core::{ProfileGeneration, RequestContext, RequestId};
 use jarvis_gaming::{ensure_cs2_not_running, TriggerObservation, WindowsCs2ProcessSource};
 use jarvis_model_protocol::{
     admit_model_proposal, encode_planning_request, AdmissionError, ModelAdmission,
-    ModelReplyReceiver, PendingModelRequest, ReplyMailboxError, RequestError,
+    ModelReplyReceiver, ModelRequestSender, PendingModelRequest, ReplyMailboxError, RequestError,
+    RequestMailboxError,
 };
 use jarvis_profiles::{
     GateError, Profile, ProfileController, RestoreError, ShutdownVerification, TransitionCause,
@@ -353,6 +354,12 @@ pub enum ModelResponseError {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub enum ModelQueueError {
+    Preparation(ModelRequestError),
+    Mailbox(RequestMailboxError),
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub enum ModelPollError {
     Mailbox(ReplyMailboxError),
     Response(ModelResponseError),
@@ -592,6 +599,31 @@ impl Supervisor {
         }
         self.pending_model_request = Some(PendingModelRequest::new(request, Instant::now()));
         Ok(encoded)
+    }
+
+    /// Prepares and queues one request without waiting for model I/O. A full
+    /// or disconnected channel cancels the pending token before returning.
+    #[allow(dead_code)]
+    pub fn queue_model_request(
+        &mut self,
+        command: &str,
+        sender: &ModelRequestSender,
+    ) -> Result<(), ModelQueueError> {
+        let encoded = self
+            .begin_model_request(command)
+            .map_err(ModelQueueError::Preparation)?;
+        let pending = self
+            .pending_model_request
+            .as_ref()
+            .expect("begin_model_request sets pending on success")
+            .clone();
+        if let Err(error) = sender.try_submit(&encoded, pending, Instant::now()) {
+            if let Some(pending) = self.pending_model_request.take() {
+                pending.cancel();
+            }
+            return Err(ModelQueueError::Mailbox(error));
+        }
+        Ok(())
     }
 
     /// One-shot validation only. No operating-system effect is dispatched.
@@ -1309,6 +1341,27 @@ mod tests {
         assert_eq!(
             supervisor.status().unwrap().active_owned_worker_processes,
             0
+        );
+    }
+
+    #[test]
+    fn queued_model_request_never_blocks_and_full_queue_cancels_pending_work() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let (sender, receiver) = jarvis_model_protocol::model_request_mailbox();
+        supervisor
+            .queue_model_request("unknown first task", &sender)
+            .unwrap();
+        assert_eq!(
+            supervisor.queue_model_request("unknown second task", &sender),
+            Err(ModelQueueError::Mailbox(RequestMailboxError::Full))
+        );
+        assert!(matches!(
+            receiver.try_receive(Instant::now()),
+            Err(RequestMailboxError::Cancelled)
+        ));
+        assert_eq!(
+            supervisor.admit_model_response(b"{}"),
+            Err(ModelResponseError::NoPendingRequest)
         );
     }
 

@@ -31,6 +31,109 @@ pub enum ReplyMailboxError {
     Disconnected,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestMailboxError {
+    Protocol(RequestError),
+    MismatchedRequest,
+    Cancelled,
+    Expired,
+    Full,
+    Disconnected,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelRequestSender(SyncSender<QueuedPlanningRequest>);
+
+#[derive(Debug)]
+pub struct ModelRequestReceiver(Receiver<QueuedPlanningRequest>);
+
+pub struct QueuedPlanningRequest {
+    encoded: Vec<u8>,
+    pending: PendingModelRequest,
+}
+
+impl fmt::Debug for QueuedPlanningRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QueuedPlanningRequest")
+            .field("request", &self.pending.request)
+            .field("encoded_bytes", &self.encoded.len())
+            .finish()
+    }
+}
+
+impl QueuedPlanningRequest {
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Future I/O must recheck this shared token during long model work, not
+    /// only when it removes a request from the queue.
+    pub fn check_live(&self, now: Instant) -> Result<(), RequestMailboxError> {
+        self.pending.check_live(now).map_err(|error| match error {
+            AdmissionError::Cancelled => RequestMailboxError::Cancelled,
+            AdmissionError::Expired => RequestMailboxError::Expired,
+            AdmissionError::Protocol(_) | AdmissionError::Policy(_) => unreachable!(),
+        })
+    }
+}
+
+#[must_use]
+pub fn model_request_mailbox() -> (ModelRequestSender, ModelRequestReceiver) {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    (ModelRequestSender(sender), ModelRequestReceiver(receiver))
+}
+
+impl ModelRequestSender {
+    /// Never waits for a model I/O task. The shared pending token invalidates
+    /// this queued work when the supervisor enters Competitive Mode.
+    pub fn try_submit(
+        &self,
+        encoded: &[u8],
+        pending: PendingModelRequest,
+        now: Instant,
+    ) -> Result<(), RequestMailboxError> {
+        pending.check_live(now).map_err(|error| match error {
+            AdmissionError::Cancelled => RequestMailboxError::Cancelled,
+            AdmissionError::Expired => RequestMailboxError::Expired,
+            AdmissionError::Protocol(_) | AdmissionError::Policy(_) => unreachable!(),
+        })?;
+        let decoded = decode_planning_request(encoded).map_err(RequestMailboxError::Protocol)?;
+        if decoded.request_id != pending.request.request_id.value()
+            || decoded.profile_generation != pending.request.generation.value()
+        {
+            return Err(RequestMailboxError::MismatchedRequest);
+        }
+        self.0
+            .try_send(QueuedPlanningRequest {
+                encoded: encoded.to_vec(),
+                pending,
+            })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => RequestMailboxError::Full,
+                TrySendError::Disconnected(_) => RequestMailboxError::Disconnected,
+            })
+    }
+}
+
+impl ModelRequestReceiver {
+    /// The I/O task takes at most one request and drops it if its supervisor
+    /// token was canceled or the fixed deadline passed before processing.
+    pub fn try_receive(
+        &self,
+        now: Instant,
+    ) -> Result<Option<QueuedPlanningRequest>, RequestMailboxError> {
+        let queued = match self.0.try_recv() {
+            Ok(queued) => queued,
+            Err(TryRecvError::Empty) => return Ok(None),
+            Err(TryRecvError::Disconnected) => return Err(RequestMailboxError::Disconnected),
+        };
+        queued.check_live(now)?;
+        Ok(Some(queued))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ModelReplySender(SyncSender<Vec<u8>>);
 
@@ -549,6 +652,90 @@ mod tests {
         assert_eq!(
             sender.try_submit(b"later"),
             Err(ReplyMailboxError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn request_mailbox_is_bounded_nonblocking_and_request_bound() {
+        let profile = ProfileController::new();
+        let context = request(&profile);
+        let started_at = Instant::now();
+        let pending = PendingModelRequest::new(context, started_at);
+        let encoded = encode_planning_request("unknown task", context).unwrap();
+        let (sender, receiver) = model_request_mailbox();
+        assert!(matches!(receiver.try_receive(started_at), Ok(None)));
+        assert_eq!(
+            sender.try_submit(b"invalid", pending.clone(), started_at),
+            Err(RequestMailboxError::Protocol(RequestError::Malformed))
+        );
+        let other = encode_planning_request("unknown task", request(&profile)).unwrap();
+        assert_eq!(
+            sender.try_submit(&other, pending.clone(), started_at),
+            Err(RequestMailboxError::MismatchedRequest)
+        );
+        sender
+            .try_submit(&encoded, pending.clone(), started_at)
+            .unwrap();
+        assert_eq!(
+            sender.try_submit(&encoded, pending.clone(), started_at),
+            Err(RequestMailboxError::Full)
+        );
+        let taken = receiver.try_receive(started_at).unwrap().unwrap();
+        assert_eq!(taken.bytes(), encoded);
+        assert!(!format!("{taken:?}").contains("unknown task"));
+        assert!(matches!(receiver.try_receive(started_at), Ok(None)));
+        drop(receiver);
+        assert_eq!(
+            sender.try_submit(&encoded, pending, started_at),
+            Err(RequestMailboxError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn queued_request_is_dropped_after_cancel_or_deadline() {
+        let profile = ProfileController::new();
+        let request = request(&profile);
+        let started_at = Instant::now();
+        let pending = PendingModelRequest::new(request, started_at);
+        let encoded = encode_planning_request("unknown task", request).unwrap();
+        let (sender, receiver) = model_request_mailbox();
+        sender
+            .try_submit(&encoded, pending.clone(), started_at)
+            .unwrap();
+        pending.cancel();
+        assert!(matches!(
+            receiver.try_receive(started_at),
+            Err(RequestMailboxError::Cancelled)
+        ));
+        assert_eq!(
+            sender.try_submit(&encoded, pending, started_at),
+            Err(RequestMailboxError::Cancelled)
+        );
+
+        let fresh = PendingModelRequest::new(request, started_at);
+        sender
+            .try_submit(&encoded, fresh.clone(), started_at)
+            .unwrap();
+        assert!(matches!(
+            receiver.try_receive(started_at + MODEL_REPLY_DEADLINE),
+            Err(RequestMailboxError::Expired)
+        ));
+
+        let in_flight = PendingModelRequest::new(request, started_at);
+        sender
+            .try_submit(&encoded, in_flight.clone(), started_at)
+            .unwrap();
+        let taken = receiver.try_receive(started_at).unwrap().unwrap();
+        assert_eq!(taken.bytes(), encoded);
+        assert_eq!(taken.check_live(started_at), Ok(()));
+        in_flight.cancel();
+        assert_eq!(
+            taken.check_live(started_at),
+            Err(RequestMailboxError::Cancelled)
+        );
+        assert_eq!(
+            taken.check_live(started_at + MODEL_REPLY_DEADLINE),
+            Err(RequestMailboxError::Cancelled)
         );
     }
 
