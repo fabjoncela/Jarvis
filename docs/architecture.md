@@ -172,6 +172,9 @@ The supervisor prepares this envelope only for unknown deterministic routes
 while both God Mode gates are open; invalid patterns and known routes never
 fall through. It holds one pending request without retaining the utterance,
 consumes response admission once, and cancels the request on Competitive entry.
+The one-slot bounded reply mailbox is nonblocking on both sides; its queued
+bytes remain inert until the serialized supervisor admits them. It is not yet
+connected to the model-worker process.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.

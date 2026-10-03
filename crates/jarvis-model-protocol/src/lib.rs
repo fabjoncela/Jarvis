@@ -8,6 +8,7 @@ use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, Validati
 use jarvis_core::{CancellationToken, RequestContext};
 use jarvis_profiles::ProfileController;
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::{Duration, Instant};
 
 pub const MODEL_PROPOSAL_SCHEMA_VERSION: u16 = 1;
@@ -19,6 +20,54 @@ const ALLOWED_ACTIONS: [&str; 3] = [
     "launch_application:chrome",
     "set_master_volume",
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplyMailboxError {
+    Empty,
+    TooLarge,
+    Full,
+    Disconnected,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelReplySender(SyncSender<Vec<u8>>);
+
+#[derive(Debug)]
+pub struct ModelReplyReceiver(Receiver<Vec<u8>>);
+
+/// A one-response channel between a future blocking I/O task and the
+/// serialized supervisor. Both send and receive operations are nonblocking.
+#[must_use]
+pub fn model_reply_mailbox() -> (ModelReplySender, ModelReplyReceiver) {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    (ModelReplySender(sender), ModelReplyReceiver(receiver))
+}
+
+impl ModelReplySender {
+    pub fn try_submit(&self, response: &[u8]) -> Result<(), ReplyMailboxError> {
+        if response.is_empty() {
+            return Err(ReplyMailboxError::Empty);
+        }
+        if response.len() > MAX_MODEL_RESPONSE_BYTES {
+            return Err(ReplyMailboxError::TooLarge);
+        }
+        match self.0.try_send(response.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(ReplyMailboxError::Full),
+            Err(TrySendError::Disconnected(_)) => Err(ReplyMailboxError::Disconnected),
+        }
+    }
+}
+
+impl ModelReplyReceiver {
+    pub fn try_receive(&self) -> Result<Option<Vec<u8>>, ReplyMailboxError> {
+        match self.0.try_recv() {
+            Ok(response) => Ok(Some(response)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(ReplyMailboxError::Disconnected),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestError {
@@ -318,6 +367,28 @@ mod tests {
         assert_eq!(
             encode_planning_request(&"x".repeat(MAX_MODEL_UTTERANCE_BYTES + 1), request),
             Err(RequestError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn one_slot_reply_mailbox_never_blocks_or_accepts_unbounded_data() {
+        let (sender, receiver) = model_reply_mailbox();
+        assert_eq!(receiver.try_receive(), Ok(None));
+        assert_eq!(sender.try_submit(b""), Err(ReplyMailboxError::Empty));
+        assert_eq!(
+            sender.try_submit(&vec![b'x'; MAX_MODEL_RESPONSE_BYTES + 1]),
+            Err(ReplyMailboxError::TooLarge)
+        );
+        sender.try_submit(b"first").unwrap();
+        assert_eq!(sender.try_submit(b"second"), Err(ReplyMailboxError::Full));
+        assert_eq!(receiver.try_receive(), Ok(Some(b"first".to_vec())));
+        sender.try_submit(b"third").unwrap();
+        assert_eq!(receiver.try_receive(), Ok(Some(b"third".to_vec())));
+        assert_eq!(receiver.try_receive(), Ok(None));
+        drop(receiver);
+        assert_eq!(
+            sender.try_submit(b"later"),
+            Err(ReplyMailboxError::Disconnected)
         );
     }
 

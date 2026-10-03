@@ -15,6 +15,10 @@ request/response IPC, timeout, crash, and child-process cases remain open.
 The resident supervisor's explicit `--model-worker-self-check` also passed
 two cooperative cycles on 3 October 2026 while the fixed competitive triggers
 were inactive. It is a lifecycle diagnostic, not inference.
+The protocol crate now has a one-slot nonblocking reply mailbox; an I/O task
+can submit at most 4,096 bytes and the supervisor can poll without waiting.
+The mailbox and post-Competitive rejection are fixture-tested, but no real
+worker IPC is connected.
 
 The future response must be one complete JSON value, for example:
 

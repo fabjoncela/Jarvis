@@ -15,7 +15,7 @@ use jarvis_core::{ProfileGeneration, RequestContext, RequestId};
 use jarvis_gaming::{ensure_cs2_not_running, TriggerObservation, WindowsCs2ProcessSource};
 use jarvis_model_protocol::{
     admit_model_proposal, encode_planning_request, AdmissionError, ModelAdmission,
-    PendingModelRequest, RequestError,
+    ModelReplyReceiver, PendingModelRequest, ReplyMailboxError, RequestError,
 };
 use jarvis_profiles::{
     GateError, Profile, ProfileController, RestoreError, ShutdownVerification, TransitionCause,
@@ -351,6 +351,12 @@ pub enum ModelResponseError {
     Admission(AdmissionError),
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum ModelPollError {
+    Mailbox(ReplyMailboxError),
+    Response(ModelResponseError),
+}
+
 /// The one authoritative mutable owner for a future long-lived Jarvis process.
 ///
 /// All request admission takes `&mut self`, keeping policy and monitor
@@ -580,6 +586,22 @@ impl Supervisor {
             &self.controller,
         )
         .map_err(ModelResponseError::Admission)
+    }
+
+    /// Checks at most one bounded queued reply without waiting for model I/O.
+    /// A late reply after Competitive entry is rejected by the absent pending
+    /// request and can never produce an executable plan.
+    #[allow(dead_code)]
+    pub fn poll_model_reply(
+        &mut self,
+        receiver: &ModelReplyReceiver,
+    ) -> Result<Option<ModelAdmission>, ModelPollError> {
+        let Some(response) = receiver.try_receive().map_err(ModelPollError::Mailbox)? else {
+            return Ok(None);
+        };
+        self.admit_model_response(&response)
+            .map(Some)
+            .map_err(ModelPollError::Response)
     }
 
     /// Executes the one fixed pre-match handoff only after the caller collected
@@ -1246,6 +1268,42 @@ mod tests {
         assert_eq!(
             supervisor.status().unwrap().active_owned_worker_processes,
             0
+        );
+    }
+
+    #[test]
+    fn mailbox_poll_is_nonblocking_and_rejects_reply_after_competitive_entry() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let (sender, receiver) = jarvis_model_protocol::model_reply_mailbox();
+        assert_eq!(supervisor.poll_model_reply(&receiver), Ok(None));
+        let encoded = supervisor.begin_model_request("unknown request").unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let reply = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "request_id": request["request_id"],
+            "profile_generation": request["profile_generation"],
+            "action": {"type": "no_action"}
+        }))
+        .unwrap();
+        sender.try_submit(&reply).unwrap();
+        assert_eq!(
+            supervisor.poll_model_reply(&receiver),
+            Ok(Some(ModelAdmission::NoAction))
+        );
+        assert_eq!(supervisor.poll_model_reply(&receiver), Ok(None));
+
+        supervisor
+            .begin_model_request("another unknown request")
+            .unwrap();
+        supervisor
+            .enter_competitive(TransitionCause::Cs2Process)
+            .unwrap();
+        sender.try_submit(&reply).unwrap();
+        assert_eq!(
+            supervisor.poll_model_reply(&receiver),
+            Err(ModelPollError::Response(
+                ModelResponseError::NoPendingRequest
+            ))
         );
     }
 
