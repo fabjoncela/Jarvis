@@ -190,6 +190,12 @@ compatibility claim; no model inference or model-proposed action is running.
     length-prefixed frame decoder that rejects empty, oversize, partial, and
     extra data without retaining an utterance in diagnostics; no OS pipe is
     connected to it.
+    A dormant supervisor-side I/O pump now composes the bounded outbound
+    queue, request/response frames, cancellation checks, and reply queue.
+    In-memory tests use the inert no-action handler and cover queued and
+    in-flight Competitive cancellation plus extra response data. The pump is
+    not spawned or called by the resident monitor; it has no authenticated
+    Windows transport or model runtime.
 26. A second fixed `jarvis-model-worker.exe` identity is in the worker
     manifest and FFI allowlist. The binary currently only waits for its
     manager-created cooperative shutdown event; it loads no model and has no

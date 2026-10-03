@@ -7,6 +7,8 @@
 //! process/service poller; pre-match, Discord, and Chrome are the only
 //! user-app launchers.
 
+#[allow(dead_code)]
+mod model_io;
 mod supervisor;
 
 use std::env;

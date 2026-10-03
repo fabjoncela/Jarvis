@@ -19,6 +19,7 @@ jarvis-verification = { path = "../../crates/jarvis-verification" }
 jarvis-windows = { path = "../../crates/jarvis-windows" }
 
 [dev-dependencies]
+jarvis-model-worker = { path = "../model-worker" }
 jarvis-storage = { path = "../../crates/jarvis-storage", features = ["test-util"] }
 serde_json = "1.0"
 

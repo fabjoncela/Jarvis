@@ -157,6 +157,7 @@ dependencies = [
  "jarvis-core",
  "jarvis-gaming",
  "jarvis-model-protocol",
+ "jarvis-model-worker",
  "jarvis-profiles",
  "jarvis-router",
  "jarvis-session-context",
