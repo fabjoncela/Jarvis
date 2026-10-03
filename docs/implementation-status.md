@@ -176,6 +176,17 @@ but no before count or window check was taken, so the process count cannot be
 attributed to that request. No URL, credentials, game, FACEIT component, or
 service was launched by this Chrome command.
 
+## Model-worker lifecycle shell deployment (3 October 2026)
+
+The new fixed worker shell passed a native contained start, cooperative stop,
+empty-Job verification, and restart test. The workspace test, clippy, and
+build checks passed. The resident monitor was replaced with the matching
+`target\debug\jarvis.exe` (PID 12080 at deployment) only after its old owner
+reported healthy stable God Mode with CS2, FACEIT Anti-Cheat Launcher, and
+`FACEITService` inactive. The new owner reported the same state. No model was
+loaded, no game or FACEIT component was touched, and there is no user-facing
+model execution path yet.
+
 ## Read-only volume smoke result (3 October 2026)
 
 After a successful workspace build and self-check, the old monitor was
@@ -188,8 +199,8 @@ changed. The `--set-volume` write path remains untested on the live endpoint.
 
 ## Explicitly not implemented
 
-- any worker capability beyond
-  the fixed session worker's cooperative exit event
+- any worker capability beyond the fixed session/model shells' cooperative
+  exit events
 - an installed Windows service or automatic startup
 - native lifecycle notifications available on every Windows token; the current
   local self-check received WMI access denied, so this workstation must use the
