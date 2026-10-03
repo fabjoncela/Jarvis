@@ -98,6 +98,10 @@ binary path as the monitor; an isolated build and `cargo run` from the default
 target are different identities and cannot talk to each other.
 Once that monitor is running, the same-image client can run
 `cargo run -p jarvis -- --model-worker-self-check` while God Mode is healthy.
+`--combined-worker-self-check` starts the fixed session and model shells
+together, verifies two owned Job members, shuts both down, reconciles the
+competitive triggers, and repeats only if the worker gate remains open. It
+never loads a model or starts a game or desktop application.
 
 For opt-in timing diagnostics, start the monitor with
 `--monitor-competitive --diagnostics`; it reports monotonic reconciliation

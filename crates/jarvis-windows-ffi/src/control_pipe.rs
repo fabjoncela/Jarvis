@@ -114,6 +114,7 @@ pub enum SupervisorControlCommand {
     PrepareFaceitCs2,
     WorkerSelfCheck,
     ModelWorkerSelfCheck,
+    CombinedWorkerSelfCheck,
     RememberPreferredApp {
         event_id: u128,
         expected_generation: u64,
@@ -152,6 +153,7 @@ impl SupervisorControlCommand {
             Self::PrepareFaceitCs2 => b"JARVIS/1 PREPARE_FACEIT_CS2".to_vec(),
             Self::WorkerSelfCheck => b"JARVIS/1 WORKER_SELF_CHECK".to_vec(),
             Self::ModelWorkerSelfCheck => b"JARVIS/1 MODEL_WORKER_SELF_CHECK".to_vec(),
+            Self::CombinedWorkerSelfCheck => b"JARVIS/1 COMBINED_WORKER_SELF_CHECK".to_vec(),
             Self::RememberPreferredApp {
                 event_id,
                 expected_generation,
@@ -184,6 +186,7 @@ impl SupervisorControlCommand {
             b"JARVIS/1 PREPARE_FACEIT_CS2" => Some(Self::PrepareFaceitCs2),
             b"JARVIS/1 WORKER_SELF_CHECK" => Some(Self::WorkerSelfCheck),
             b"JARVIS/1 MODEL_WORKER_SELF_CHECK" => Some(Self::ModelWorkerSelfCheck),
+            b"JARVIS/1 COMBINED_WORKER_SELF_CHECK" => Some(Self::CombinedWorkerSelfCheck),
             b"JARVIS/1 SHOW_PREFERRED_APP" => Some(Self::ShowPreferredApp),
             b"JARVIS/1 PREFERRED_APP_STATE" => Some(Self::PreferredAppState),
             _ => {
@@ -801,6 +804,16 @@ mod tests {
         );
         assert_eq!(
             SupervisorControlCommand::parse(b"JARVIS/1 MODEL_WORKER_SELF_CHECK EXTRA"),
+            None
+        );
+        assert_eq!(
+            SupervisorControlCommand::parse(
+                &SupervisorControlCommand::CombinedWorkerSelfCheck.wire()
+            ),
+            Some(SupervisorControlCommand::CombinedWorkerSelfCheck)
+        );
+        assert_eq!(
+            SupervisorControlCommand::parse(b"JARVIS/1 COMBINED_WORKER_SELF_CHECK EXTRA"),
             None
         );
         assert_eq!(

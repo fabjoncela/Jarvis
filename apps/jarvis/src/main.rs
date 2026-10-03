@@ -55,6 +55,9 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
         [flag] if flag == "--prepare-faceit-cs2" => return prepare_faceit_cs2(),
         [flag] if flag == "--worker-self-check" => return worker_self_check_client(),
         [flag] if flag == "--model-worker-self-check" => return model_worker_self_check_client(),
+        [flag] if flag == "--combined-worker-self-check" => {
+            return combined_worker_self_check_client()
+        }
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
@@ -102,7 +105,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --model-worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --open-chrome | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --feedback-last-discord <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --model-worker-self-check | --combined-worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --open-chrome | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --feedback-last-discord <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -280,6 +283,13 @@ fn model_worker_self_check_client() -> Result<(), String> {
     )
 }
 
+fn combined_worker_self_check_client() -> Result<(), String> {
+    worker_self_check_request(
+        SupervisorControlCommand::CombinedWorkerSelfCheck,
+        "COMBINED_WORKER_SELF_CHECK",
+    )
+}
+
 fn worker_self_check_request(
     command: SupervisorControlCommand,
     response_kind: &str,
@@ -314,6 +324,49 @@ fn checked_worker_cycle(
         return Err("worker self-check did not observe a clean cooperative worker exit".to_owned());
     }
     Ok(identity)
+}
+
+fn checked_combined_worker_cycle(
+    supervisor: &mut Supervisor,
+    installation_directory: &Path,
+) -> Result<
+    (
+        jarvis_windows::WorkerProcessIdentity,
+        jarvis_windows::WorkerProcessIdentity,
+    ),
+    String,
+> {
+    let session = supervisor
+        .start_internal_worker(InternalWorker::Session, installation_directory)
+        .map_err(|error| {
+            format!("combined worker self-check could not start session shell: {error}")
+        })?;
+    let started = (|| {
+        let model = supervisor
+            .start_internal_worker(InternalWorker::Model, installation_directory)
+            .map_err(|error| {
+                format!("combined worker self-check could not start model shell: {error}")
+            })?;
+        let active = supervisor
+            .status()
+            .map_err(|error| error.to_string())?
+            .active_owned_worker_processes;
+        if active != 2 {
+            return Err(format!(
+                "combined worker self-check expected two owned processes, found {active}"
+            ));
+        }
+        Ok((session, model))
+    })();
+    let shutdown = supervisor
+        .shutdown_internal_workers()
+        .map_err(|error| error.to_string());
+    let shutdown = shutdown?;
+    let identities = started?;
+    if shutdown.used_forced_termination || !shutdown.all_workers_exited_successfully {
+        return Err("combined worker self-check did not observe two clean exits".to_owned());
+    }
+    Ok(identities)
 }
 
 /// Exercises the serialized Competitive Mode gate and real owned-worker
@@ -883,6 +936,45 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 final_status.profile,
                 after.health,
             ))
+        }
+        SupervisorControlCommand::CombinedWorkerSelfCheck => {
+            if !status.worker_start_gate_open {
+                return Ok("ERR POLICY".to_owned());
+            }
+            let executable = env::current_exe().map_err(|error| error.to_string())?;
+            let installation_directory = executable.parent().ok_or_else(|| {
+                "could not determine the supervisor executable directory".to_owned()
+            })?;
+            let check = (|| {
+                let first = checked_combined_worker_cycle(supervisor, installation_directory)?;
+                let _ = monitor_cycle(supervisor, detector, last_report)?;
+                if !supervisor
+                    .status()
+                    .map_err(|error| error.to_string())?
+                    .worker_start_gate_open
+                {
+                    return Err("combined worker restart denied after profile changed".to_owned());
+                }
+                let second = checked_combined_worker_cycle(supervisor, installation_directory)?;
+                if first.0 == second.0 || first.1 == second.1 {
+                    return Err("combined worker restart retained a stale identity".to_owned());
+                }
+                Ok((first, second))
+            })();
+            let _ = monitor_cycle(supervisor, detector, last_report)?;
+            match check {
+                Ok((first, second)) => Ok(format!(
+                    "OK COMBINED_WORKER_SELF_CHECK FIRST_SESSION_PID={} FIRST_MODEL_PID={} SECOND_SESSION_PID={} SECOND_MODEL_PID={}",
+                    first.0.process_id(),
+                    first.1.process_id(),
+                    second.0.process_id(),
+                    second.1.process_id(),
+                )),
+                Err(error) => {
+                    eprintln!("authoritative combined worker containment check failed: {error}");
+                    Ok("ERR COMBINED_WORKER_SELF_CHECK".to_owned())
+                }
+            }
         }
         SupervisorControlCommand::WorkerSelfCheck
         | SupervisorControlCommand::ModelWorkerSelfCheck => {

@@ -202,6 +202,14 @@ compatibility claim; no model inference or model-proposed action is running.
     distinct process IDs, left no model-worker process, and preserved healthy
     idle God Mode. This diagnostic still loads no Qwen model or inference
     runtime.
+27. `--combined-worker-self-check` is a fixed resident-only diagnostic for
+    starting both inert shells in the same owned Job, checking that it has
+    exactly two members, and shutting both down cleanly. It reconciles the
+    competitive snapshot before a second cycle and does not restart if the
+    worker gate closed. Protocol and workspace tests pass, but the combined
+    live check has not run: on 3 October the resident monitor reported
+    `ActivityObservationUnavailable` and stable Competitive Mode while
+    FACEITService was running. No worker or FACEIT component was changed.
 
 ## Fixed Chrome launch smoke result (3 October 2026)
 
