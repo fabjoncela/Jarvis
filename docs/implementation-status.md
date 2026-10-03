@@ -24,18 +24,18 @@ compatibility claim; no model inference or model-proposed action is running.
    collisions, and external cleanup targets. It does not certify FACEIT
    compatibility or a local FACEIT identity.
 5. `jarvis-actions` accepts only typed, configured plans. There is no general
-   action executor; the pre-match capability and fixed Discord/Chrome launchers have
-    separate supervisor-owned paths. Standalone CS2/FACEIT Anti-Cheat launch
-    plans are rejected even though those IDs are configured; the confirmed
-    pre-match handoff must be the plan's sole action.
+   action executor; the pre-match capability and fixed Discord/Chrome launchers
+   have separate supervisor-owned paths. Standalone CS2/FACEIT Anti-Cheat
+   launch plans are rejected even though those IDs are configured; the
+   confirmed pre-match handoff must be the plan's sole action.
 6. `jarvis-router` performs conservative normalization, config-derived exact
    aliases, and a bounded `set volume to <0..100>` pattern.
 7. `jarvis-windows-ffi` owns the only reviewed raw Win32 calls. It creates an
    unnamed Job Object with `KILL_ON_JOB_CLOSE`, and can start only the fixed
-   session-worker enum entry under an installation directory: create suspended,
-   assign to the Job Object, verify membership, then resume. It creates that
-   worker's fixed named exit event before resume, observes the exact process
-   handle and exit code, and never accepts a general IPC payload.
+   session- or model-worker enum entry under an installation directory: create
+   suspended, assign to the Job Object, verify membership, then resume. It
+   creates each worker's fixed named exit event before resume, observes the
+   exact process handle and exit code, and never accepts a general IPC payload.
 8. `jarvis-windows` retains the in-memory adapter for policy tests, owns the
    fixed two-entry internal-worker manifest, and provides an opaque worker
    manager. It sends only the fixed cooperative-exit signal, waits a bounded
@@ -72,9 +72,9 @@ compatibility claim; no model inference or model-proposed action is running.
     only from a healthy all-clear snapshot after the configured cooldown.
     `--detection-self-check` runs one reconciliation cycle and exits. For the
     current Windows account, the monitor owns one exclusive, owner-only local
-    named pipe with a fixed protocol (`STATUS`, `PREPARE_FACEIT_CS2`,
-    `WORKER_SELF_CHECK`, `LAST_HANDOFF`, `OPEN_DISCORD`, and bounded preferred-app state/save/clear/restore
-    commands).
+    named pipe with a fixed protocol for status, the handoff, both worker
+    self-checks, Discord/Chrome, volume, feedback, and bounded preferred-app
+    state/save/clear/restore commands.
     It rejects remote clients and validates the connected
     client's executable path. Handoff and worker-start CLI commands require
     this authority and are serialized on the same owner; they fail closed if it
@@ -115,11 +115,11 @@ compatibility claim; no model inference or model-proposed action is running.
     tombstone. Neither command launches an app or changes routing.
     An existing v1 database must receive a verified SQLite-consistent backup
     before the v2 migration; failure or a pre-existing backup blocks upgrade.
-18. `--execute <text>` is an opt-in text entry point for configured Discord
-    aliases only. The client router maps them to the existing fixed
-    `OPEN_DISCORD` pipe command; all other plans and unknown text are rejected
-    before IPC. The resident owner still validates its typed action, profile,
-    and generation. `--route` remains validation-only.
+18. `--execute <text>` is an opt-in text entry point for configured Discord and
+    Chrome aliases or the bounded master-volume pattern. The client maps each
+    to its fixed typed pipe command; all other plans and unknown text are
+    rejected before IPC. The resident owner still validates its typed action,
+    profile, and generation. `--route` remains validation-only.
 19. `--discord-status` makes one read-only fixed-scope process snapshot in
     God Mode. It verifies PID/creation-time identity, canonical versioned
     Discord image location, and Windows trust, and reports the process count.
@@ -173,8 +173,9 @@ compatibility claim; no model inference or model-proposed action is running.
     invalid patterns cannot fall through to it. Only one pending request is
     retained; response admission is one-shot and validation-only. Competitive
     entry cancels it before owned-worker shutdown. No request is sent to a
-    model yet. Unknown text explicitly naming FACEIT, CS2, or Anti-Cheat is
-    denied at this fallback gate and needs a reviewed explicit workflow.
+    model yet. Unknown text naming FACEIT, CS2, Anti-Cheat, Steam, or
+    Counter-Strike, including separator variants, is denied at this fallback
+    gate and needs a reviewed explicit workflow.
     A separate one-slot, 4,096-byte reply mailbox lets a future blocking I/O
     task submit without waiting; the supervisor polls it without waiting and
     applies the same one-shot admission. Tests reject a queued reply after
