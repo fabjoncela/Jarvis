@@ -1721,28 +1721,28 @@ mod tests {
     }
 
     #[test]
-    fn competitive_mode_denies_model_shell_self_check_before_path_access() {
-        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
-        supervisor
-            .enter_competitive(TransitionCause::Manual)
-            .unwrap();
-        let mut detector = FailClosedTriggerDetector::new(SequenceSnapshotSource(VecDeque::from(
-            [Ok(TriggerSnapshot::default())],
-        )));
-        let mut last_report = None;
-        assert_eq!(
-            handle_control_request(
-                SupervisorControlCommand::ModelWorkerSelfCheck,
-                &mut supervisor,
-                &mut detector,
-                &mut last_report,
-            ),
-            Ok("ERR POLICY".to_owned())
-        );
-        assert_eq!(
-            supervisor.status().unwrap().active_owned_worker_processes,
-            0
-        );
+    fn competitive_mode_denies_shell_self_checks_before_path_access() {
+        for command in [
+            SupervisorControlCommand::ModelWorkerSelfCheck,
+            SupervisorControlCommand::CombinedWorkerSelfCheck,
+        ] {
+            let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+            supervisor
+                .enter_competitive(TransitionCause::Manual)
+                .unwrap();
+            let mut detector = FailClosedTriggerDetector::new(SequenceSnapshotSource(
+                VecDeque::from([Ok(TriggerSnapshot::default())]),
+            ));
+            let mut last_report = None;
+            assert_eq!(
+                handle_control_request(command, &mut supervisor, &mut detector, &mut last_report,),
+                Ok("ERR POLICY".to_owned())
+            );
+            assert_eq!(
+                supervisor.status().unwrap().active_owned_worker_processes,
+                0
+            );
+        }
     }
 
     #[test]
