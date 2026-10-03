@@ -27,9 +27,9 @@ plus fixed Discord/Chrome launchers and one typed master-volume action:
   assigns and verifies its Job Object membership, then resumes it; each check
   verifies a bounded cooperative exit and safe restart after the Job Object is
   empty;
-- a bounded, versioned model-request/proposal protocol with a one-slot reply
-  mailbox. This is an inert safety boundary: no model runtime or worker IPC is
-  connected to it yet.
+- a bounded, versioned model-request/proposal protocol with one-slot
+  nonblocking request and reply mailboxes. This is an inert safety boundary:
+  no model runtime or worker IPC is connected to it yet.
 
 No microphone capture, model loading, or game interaction is active in this
 scaffold. There is no installed Windows service, automatic startup, model
@@ -51,6 +51,8 @@ records proposed post-current-version upgrades without enabling them.
 The [V1 Qwen preflight](docs/qwen-v1-preflight.md) records the observed local
 model and the worker/benchmark gates for the planned single- or dual-tier
 integration; it does not load a model.
+The [model-worker transport contract](docs/model-worker-transport.md) records
+the IPC identity and cancellation tests required before inference is enabled.
 
 ## Prerequisites
 
