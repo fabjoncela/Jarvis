@@ -61,6 +61,10 @@ valid. This schema does not grant execution authority.
    containment job. It receives a bounded typed planning request and returns
    only a schema-valid proposal. The worker never receives raw executable
    paths, shell authority, or a profile/policy mutation capability.
+   Request/response transport must not block the supervisor's independent
+   500 ms competitive snapshot watchdog while the model loads or generates.
+   A bounded I/O thread or equivalent async boundary may carry bytes, but
+   only the serialized supervisor may admit a returned proposal.
 3. Recheck profile generation and all typed action permissions in the Rust
    supervisor after the model response and again before each side effect.
    Reject stale, malformed, partial, oversized, or uncertain plans. A
@@ -86,6 +90,12 @@ valid. This schema does not grant execution authority.
   PC, without launching or interacting with a game for artificial scores.
 - No cloud fallback, automatic model download, persistent server, or default
   transcript retention.
+
+Ollama's documented API defaults to keeping a model loaded for five minutes
+after a request; an API `keep_alive` value can override that. This alone does
+not prove Competitive Mode cleanup, because the serving process and any
+children still need ownership and verified termination. See the
+[official Ollama API documentation](https://github.com/ollama/ollama/blob/main/docs/api.md).
 
 The current Jarvis checkout has no inference worker yet. The existing
 deterministic commands and fixed launch paths remain the only runtime
