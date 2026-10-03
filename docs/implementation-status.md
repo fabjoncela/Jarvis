@@ -186,7 +186,10 @@ compatibility claim; no model inference or model-proposed action is running.
     task. The worker-side decoder checks a 2,048-byte envelope,
     exact capability list, and request shape; the model-worker library returns
     only an echoed `no_action` response in tests. This is a transport contract,
-    not live worker IPC.
+    not live worker IPC. The protocol also has a bounded incremental
+    length-prefixed frame decoder that rejects empty, oversize, partial, and
+    extra data without retaining an utterance in diagnostics; no OS pipe is
+    connected to it.
 26. A second fixed `jarvis-model-worker.exe` identity is in the worker
     manifest and FFI allowlist. The binary currently only waits for its
     manager-created cooperative shutdown event; it loads no model and has no

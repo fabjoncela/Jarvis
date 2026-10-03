@@ -43,6 +43,13 @@ tests this lifecycle without IPC or inference.
   file path, game action, or policy change can be emitted. A valid response is
   still only a candidate until current profile, generation, and action policy
   are rechecked immediately before each effect.
+- The protocol crate now has a four-byte little-endian length prefix and an
+  incremental one-frame decoder. It caps request/reply allocation at the
+  reviewed 2,048/4,096-byte limits, latches malformed-frame errors, and
+  rejects zero-length, partial, or extra-frame input. The payload is returned
+  only by `finish`, which the transport must call at a verified pipe-message
+  boundary, not merely when a byte count happens to match. It is not yet
+  attached to a Windows pipe or an I/O thread.
 - No user utterance, model output, pipe token, or credential is written to
   normal logs. Diagnostics may record byte counts, timings, outcome codes,
   and request IDs only.

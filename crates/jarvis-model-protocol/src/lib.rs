@@ -17,11 +17,148 @@ pub const MAX_MODEL_RESPONSE_BYTES: usize = 4096;
 pub const MAX_MODEL_UTTERANCE_BYTES: usize = 1024;
 pub const MAX_MODEL_REQUEST_BYTES: usize = 2048;
 pub const MODEL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
+const FRAME_HEADER_BYTES: usize = 4;
 const ALLOWED_ACTIONS: [&str; 3] = [
     "launch_application:discord",
     "launch_application:chrome",
     "set_master_volume",
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameKind {
+    Request,
+    Response,
+}
+
+impl FrameKind {
+    const fn maximum(self) -> usize {
+        match self {
+            Self::Request => MAX_MODEL_REQUEST_BYTES,
+            Self::Response => MAX_MODEL_RESPONSE_BYTES,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameError {
+    Empty,
+    TooLarge,
+    TrailingData,
+    Incomplete,
+}
+
+/// Encode exactly one message for a future byte-stream transport. No caller
+/// can select a payload maximum larger than the reviewed request/reply caps.
+pub fn encode_frame(kind: FrameKind, payload: &[u8]) -> Result<Vec<u8>, FrameError> {
+    if payload.is_empty() {
+        return Err(FrameError::Empty);
+    }
+    if payload.len() > kind.maximum() {
+        return Err(FrameError::TooLarge);
+    }
+    let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+/// One-frame incremental decoder. A transport task can feed whatever chunks
+/// Windows returns; this never allocates from an unchecked length header.
+pub struct FrameDecoder {
+    kind: FrameKind,
+    header: [u8; FRAME_HEADER_BYTES],
+    header_len: usize,
+    expected: Option<usize>,
+    payload: Vec<u8>,
+    complete: bool,
+    failed: Option<FrameError>,
+}
+
+impl fmt::Debug for FrameDecoder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FrameDecoder")
+            .field("kind", &self.kind)
+            .field("header_len", &self.header_len)
+            .field("payload_bytes", &self.payload.len())
+            .field("complete", &self.complete)
+            .field("failed", &self.failed)
+            .finish()
+    }
+}
+
+impl FrameDecoder {
+    #[must_use]
+    pub fn new(kind: FrameKind) -> Self {
+        Self {
+            kind,
+            header: [0; FRAME_HEADER_BYTES],
+            header_len: 0,
+            expected: None,
+            payload: Vec::new(),
+            complete: false,
+            failed: None,
+        }
+    }
+
+    pub fn feed(&mut self, mut chunk: &[u8]) -> Result<(), FrameError> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        if self.complete {
+            return if chunk.is_empty() {
+                Ok(())
+            } else {
+                self.fail(FrameError::TrailingData)
+            };
+        }
+        if self.header_len < FRAME_HEADER_BYTES {
+            let take = (FRAME_HEADER_BYTES - self.header_len).min(chunk.len());
+            self.header[self.header_len..self.header_len + take].copy_from_slice(&chunk[..take]);
+            self.header_len += take;
+            chunk = &chunk[take..];
+            if self.header_len < FRAME_HEADER_BYTES {
+                return Ok(());
+            }
+            let expected = u32::from_le_bytes(self.header) as usize;
+            if expected == 0 {
+                return self.fail(FrameError::Empty);
+            }
+            if expected > self.kind.maximum() {
+                return self.fail(FrameError::TooLarge);
+            }
+            self.expected = Some(expected);
+            self.payload.reserve_exact(expected);
+        }
+        let expected = self.expected.expect("complete header sets expected length");
+        let remaining = expected - self.payload.len();
+        if chunk.len() > remaining {
+            return self.fail(FrameError::TrailingData);
+        }
+        self.payload.extend_from_slice(chunk);
+        if self.payload.len() == expected {
+            self.complete = true;
+        }
+        Ok(())
+    }
+
+    /// Call only after the transport confirms the end of this pipe message.
+    /// The payload is unavailable until this boundary has been checked.
+    pub fn finish(self) -> Result<Vec<u8>, FrameError> {
+        if let Some(error) = self.failed {
+            Err(error)
+        } else if self.complete {
+            Ok(self.payload)
+        } else {
+            Err(FrameError::Incomplete)
+        }
+    }
+
+    fn fail(&mut self, error: FrameError) -> Result<(), FrameError> {
+        self.failed = Some(error);
+        Err(error)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplyMailboxError {
@@ -515,6 +652,65 @@ mod tests {
             request.generation.value().into(),
         );
         value.to_string()
+    }
+
+    #[test]
+    fn incremental_frame_round_trip_handles_every_split_without_leaking_text() {
+        let profile = ProfileController::new();
+        let request = request(&profile);
+        let payload = encode_planning_request("private unknown task", request).unwrap();
+        let framed = encode_frame(FrameKind::Request, &payload).unwrap();
+        assert_eq!(framed.len(), payload.len() + FRAME_HEADER_BYTES);
+        for split in 0..=framed.len() {
+            let mut decoder = FrameDecoder::new(FrameKind::Request);
+            decoder.feed(&framed[..split]).unwrap();
+            decoder.feed(&framed[split..]).unwrap();
+            assert!(!format!("{decoder:?}").contains("private unknown task"));
+            assert_eq!(decoder.finish(), Ok(payload.clone()));
+        }
+    }
+
+    #[test]
+    fn frame_decoder_rejects_oversize_empty_partial_and_extra_data() {
+        assert_eq!(
+            encode_frame(FrameKind::Request, b""),
+            Err(FrameError::Empty)
+        );
+        assert_eq!(
+            encode_frame(FrameKind::Request, &vec![0; MAX_MODEL_REQUEST_BYTES + 1]),
+            Err(FrameError::TooLarge)
+        );
+        assert_eq!(
+            encode_frame(FrameKind::Response, &vec![0; MAX_MODEL_RESPONSE_BYTES + 1]),
+            Err(FrameError::TooLarge)
+        );
+        let oversized_header = ((MAX_MODEL_REQUEST_BYTES + 1) as u32).to_le_bytes();
+        let mut decoder = FrameDecoder::new(FrameKind::Request);
+        assert_eq!(decoder.feed(&oversized_header), Err(FrameError::TooLarge));
+        assert_eq!(decoder.feed(b"later"), Err(FrameError::TooLarge));
+        assert_eq!(decoder.finish(), Err(FrameError::TooLarge));
+        let mut decoder = FrameDecoder::new(FrameKind::Response);
+        assert_eq!(decoder.feed(&0_u32.to_le_bytes()), Err(FrameError::Empty));
+
+        let framed = encode_frame(FrameKind::Response, b"reply").unwrap();
+        let mut decoder = FrameDecoder::new(FrameKind::Response);
+        assert_eq!(decoder.feed(&framed[..framed.len() - 1]), Ok(()));
+        assert_eq!(decoder.finish(), Err(FrameError::Incomplete));
+        let mut decoder = FrameDecoder::new(FrameKind::Response);
+        decoder.feed(&framed[..framed.len() - 1]).unwrap();
+        assert_eq!(decoder.feed(&framed[framed.len() - 1..]), Ok(()));
+        assert_eq!(decoder.finish(), Ok(b"reply".to_vec()));
+
+        let mut decoder = FrameDecoder::new(FrameKind::Response);
+        assert_eq!(
+            decoder.feed(&[framed.as_slice(), b"second"].concat()),
+            Err(FrameError::TrailingData)
+        );
+        assert_eq!(decoder.feed(b"later"), Err(FrameError::TrailingData));
+        let mut decoder = FrameDecoder::new(FrameKind::Response);
+        decoder.feed(&framed).unwrap();
+        assert_eq!(decoder.feed(b"second"), Err(FrameError::TrailingData));
+        assert_eq!(decoder.finish(), Err(FrameError::TrailingData));
     }
 
     #[test]
