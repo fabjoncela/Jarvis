@@ -19,6 +19,9 @@ The protocol crate now has a one-slot nonblocking reply mailbox; an I/O task
 can submit at most 4,096 bytes and the supervisor can poll without waiting.
 The mailbox and post-Competitive rejection are fixture-tested, but no real
 worker IPC is connected.
+The worker-side parser rejects extra fields, changed capabilities, partial or
+oversized messages. A tested handler currently returns only `no_action`; the
+running shell still has no request pipe or inference code.
 
 The future response must be one complete JSON value, for example:
 

@@ -172,7 +172,10 @@ pre-match launch sequence, not a running desktop assistant:
     A separate one-slot, 4,096-byte reply mailbox lets a future blocking I/O
     task submit without waiting; the supervisor polls it without waiting and
     applies the same one-shot admission. Tests reject a queued reply after
-    Competitive entry. This is a transport contract, not live worker IPC.
+    Competitive entry. The worker-side decoder checks a 2,048-byte envelope,
+    exact capability list, and request shape; the model-worker library returns
+    only an echoed `no_action` response in tests. This is a transport contract,
+    not live worker IPC.
 26. A second fixed `jarvis-model-worker.exe` identity is in the worker
     manifest and FFI allowlist. The binary currently only waits for its
     manager-created cooperative shutdown event; it loads no model and has no

@@ -209,6 +209,8 @@ dependencies = [
 name = "jarvis-model-worker"
 version = "0.1.0"
 dependencies = [
+ "jarvis-core",
+ "jarvis-model-protocol",
  "jarvis-windows",
  "jarvis-windows-ffi",
 ]

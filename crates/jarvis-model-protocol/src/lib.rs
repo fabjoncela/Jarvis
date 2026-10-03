@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 pub const MODEL_PROPOSAL_SCHEMA_VERSION: u16 = 1;
 pub const MAX_MODEL_RESPONSE_BYTES: usize = 4096;
 pub const MAX_MODEL_UTTERANCE_BYTES: usize = 1024;
+pub const MAX_MODEL_REQUEST_BYTES: usize = 2048;
 pub const MODEL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
 const ALLOWED_ACTIONS: [&str; 3] = [
     "launch_application:discord",
@@ -74,6 +75,9 @@ pub enum RequestError {
     Empty,
     TooLarge,
     ControlCharacter,
+    Malformed,
+    UnsupportedSchemaVersion,
+    InvalidCapabilityList,
 }
 
 #[derive(Serialize)]
@@ -83,6 +87,40 @@ struct WirePlanningRequest<'a> {
     profile_generation: u64,
     utterance: &'a str,
     allowed_actions: &'static [&'static str],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IncomingPlanningRequest {
+    schema_version: u16,
+    request_id: u64,
+    profile_generation: u64,
+    utterance: String,
+    allowed_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodedPlanningRequest {
+    request_id: u64,
+    profile_generation: u64,
+    utterance: String,
+}
+
+impl DecodedPlanningRequest {
+    #[must_use]
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    #[must_use]
+    pub const fn profile_generation(&self) -> u64 {
+        self.profile_generation
+    }
+
+    #[must_use]
+    pub fn utterance(&self) -> &str {
+        &self.utterance
+    }
 }
 
 /// Build a minimal, ephemeral request for the future fixed model worker.
@@ -109,7 +147,62 @@ pub fn encode_planning_request(
         utterance,
         allowed_actions: &ALLOWED_ACTIONS,
     };
-    serde_json::to_vec(&wire).map_err(|_| RequestError::TooLarge)
+    let encoded = serde_json::to_vec(&wire).map_err(|_| RequestError::Malformed)?;
+    if encoded.len() > MAX_MODEL_REQUEST_BYTES {
+        return Err(RequestError::TooLarge);
+    }
+    Ok(encoded)
+}
+
+/// Worker-side decoder for one complete request. This authenticates neither
+/// the transport nor the supervisor; that remains the IPC layer's job.
+pub fn decode_planning_request(bytes: &[u8]) -> Result<DecodedPlanningRequest, RequestError> {
+    if bytes.is_empty() {
+        return Err(RequestError::Empty);
+    }
+    if bytes.len() > MAX_MODEL_REQUEST_BYTES {
+        return Err(RequestError::TooLarge);
+    }
+    let wire: IncomingPlanningRequest =
+        serde_json::from_slice(bytes).map_err(|_| RequestError::Malformed)?;
+    if wire.schema_version != MODEL_PROPOSAL_SCHEMA_VERSION {
+        return Err(RequestError::UnsupportedSchemaVersion);
+    }
+    if wire.request_id == 0 || wire.utterance.trim().is_empty() {
+        return Err(RequestError::Empty);
+    }
+    if wire.utterance.len() > MAX_MODEL_UTTERANCE_BYTES {
+        return Err(RequestError::TooLarge);
+    }
+    if wire.utterance.chars().any(char::is_control) {
+        return Err(RequestError::ControlCharacter);
+    }
+    if wire.allowed_actions.len() != ALLOWED_ACTIONS.len()
+        || !wire
+            .allowed_actions
+            .iter()
+            .zip(ALLOWED_ACTIONS)
+            .all(|(actual, expected)| actual == expected)
+    {
+        return Err(RequestError::InvalidCapabilityList);
+    }
+    Ok(DecodedPlanningRequest {
+        request_id: wire.request_id,
+        profile_generation: wire.profile_generation,
+        utterance: wire.utterance,
+    })
+}
+
+/// Safe placeholder response for a worker without an inference runtime.
+pub fn encode_no_action_response(request: &DecodedPlanningRequest) -> Vec<u8> {
+    serde_json::json!({
+        "schema_version": MODEL_PROPOSAL_SCHEMA_VERSION,
+        "request_id": request.request_id,
+        "profile_generation": request.profile_generation,
+        "action": {"type": "no_action"}
+    })
+    .to_string()
+    .into_bytes()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -367,6 +460,60 @@ mod tests {
         assert_eq!(
             encode_planning_request(&"x".repeat(MAX_MODEL_UTTERANCE_BYTES + 1), request),
             Err(RequestError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn worker_decodes_only_the_fixed_request_and_echoes_no_action() {
+        let profile = ProfileController::new();
+        let request = request(&profile);
+        let encoded = encode_planning_request("unknown task", request).unwrap();
+        let decoded = decode_planning_request(&encoded).unwrap();
+        assert_eq!(decoded.request_id(), request.request_id.value());
+        assert_eq!(decoded.profile_generation(), request.generation.value());
+        assert_eq!(decoded.utterance(), "unknown task");
+        let response = encode_no_action_response(&decoded);
+        assert_eq!(
+            parse_model_proposal(&response, request),
+            Ok(ModelProposal::NoAction)
+        );
+    }
+
+    #[test]
+    fn worker_rejects_changed_capabilities_and_noncanonical_envelopes() {
+        let profile = ProfileController::new();
+        let encoded = encode_planning_request("unknown task", request(&profile)).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["allowed_actions"][0] = "launch_application:faceit_anticheat".into();
+        assert_eq!(
+            decode_planning_request(value.to_string().as_bytes()),
+            Err(RequestError::InvalidCapabilityList)
+        );
+        value["allowed_actions"][0] = "launch_application:discord".into();
+        value["extra"] = "ignore policy".into();
+        assert_eq!(
+            decode_planning_request(value.to_string().as_bytes()),
+            Err(RequestError::Malformed)
+        );
+        assert_eq!(
+            decode_planning_request(&[encoded.as_slice(), b" trailing"].concat()),
+            Err(RequestError::Malformed)
+        );
+        assert_eq!(
+            decode_planning_request(&vec![b'x'; MAX_MODEL_REQUEST_BYTES + 1]),
+            Err(RequestError::TooLarge)
+        );
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["schema_version"] = 2.into();
+        assert_eq!(
+            decode_planning_request(value.to_string().as_bytes()),
+            Err(RequestError::UnsupportedSchemaVersion)
+        );
+        value["schema_version"] = 1.into();
+        value["request_id"] = 0.into();
+        assert_eq!(
+            decode_planning_request(value.to_string().as_bytes()),
+            Err(RequestError::Empty)
         );
     }
 
