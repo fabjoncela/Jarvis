@@ -71,7 +71,8 @@ Chrome window with a FACEIT-like title, and opens `https://www.faceit.com/` in
 Chrome if no clear title match is found. It does not verify the actual tab URL
 or handle authentication. It then requests CS2 through Steam app 730. It is
 represented as one typed action rather than three arbitrary launch APIs. The
-supervisor rechecks profile admission before each step, and each fixed launch
+action validator rejects standalone CS2/FACEIT launch plans and mixed plans
+containing the handoff. The supervisor rechecks profile admission before each step, and each fixed launch
 repeats local identity verification. The monitor serializes the handoff with
 polling and immediately reconciles after it. Jarvis does not start
 `FACEITService` directly; the official launcher manages its own dependencies.

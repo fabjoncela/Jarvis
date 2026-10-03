@@ -20,7 +20,9 @@ pre-match launch sequence, not a running desktop assistant:
    compatibility or a local FACEIT identity.
 5. `jarvis-actions` accepts only typed, configured plans. There is no general
    action executor; the pre-match capability and fixed Discord/Chrome launchers have
-   separate supervisor-owned paths.
+    separate supervisor-owned paths. Standalone CS2/FACEIT Anti-Cheat launch
+    plans are rejected even though those IDs are configured; the confirmed
+    pre-match handoff must be the plan's sole action.
 6. `jarvis-router` performs conservative normalization, config-derived exact
    aliases, and a bounded `set volume to <0..100>` pattern.
 7. `jarvis-windows-ffi` owns the only reviewed raw Win32 calls. It creates an

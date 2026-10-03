@@ -109,6 +109,14 @@ impl ActionRegistry {
         if plan.actions.is_empty() || plan.actions.len() > MAX_ACTIONS_PER_PLAN {
             return Err(ValidationError::InvalidActionCount(plan.actions.len()));
         }
+        if plan.actions.len() != 1
+            && plan
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::StartCompetitiveHandoff))
+        {
+            return Err(ValidationError::HandoffMustBeStandalone);
+        }
         for action in &plan.actions {
             self.validate_action(action)?;
         }
@@ -135,8 +143,22 @@ impl ActionRegistry {
                     }
                 }
             }
-            Action::LaunchApplication { application_id }
-            | Action::CloseApplication { application_id } => {
+            Action::LaunchApplication { application_id } => {
+                if application_id.trim().is_empty() {
+                    return Err(ValidationError::EmptyApplicationId);
+                }
+                if matches!(application_id.as_str(), "cs2" | "faceit_anticheat") {
+                    return Err(ValidationError::PreMatchTargetRequiresHandoff(
+                        application_id.clone(),
+                    ));
+                }
+                if !self.configured_applications.contains(application_id) {
+                    return Err(ValidationError::UnregisteredApplication(
+                        application_id.clone(),
+                    ));
+                }
+            }
+            Action::CloseApplication { application_id } => {
                 if application_id.trim().is_empty() {
                     return Err(ValidationError::EmptyApplicationId);
                 }
@@ -145,9 +167,7 @@ impl ActionRegistry {
                         application_id.clone(),
                     ));
                 }
-                if matches!(action, Action::CloseApplication { .. })
-                    && self.protected_close_targets.contains(application_id)
-                {
+                if self.protected_close_targets.contains(application_id) {
                     return Err(ValidationError::ProtectedCloseTarget(
                         application_id.clone(),
                     ));
@@ -196,6 +216,8 @@ pub enum ValidationError {
     ProtectedCloseTarget(String),
     InvalidVolume(u8),
     PreMatchHandoffUnavailable { missing_application: String },
+    PreMatchTargetRequiresHandoff(String),
+    HandoffMustBeStandalone,
 }
 
 /// The implementation boundary for future Windows effects. A real executor
@@ -314,6 +336,58 @@ mod tests {
             Err(ValidationError::PreMatchHandoffUnavailable {
                 missing_application: "faceit_anticheat".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn competitive_targets_cannot_be_launched_as_individual_actions() {
+        let registry = ActionRegistry::new(
+            ["faceit_anticheat", "chrome", "cs2", "discord"],
+            ["faceit_anticheat", "cs2"],
+        );
+        let profile = ProfileController::new();
+        for target in ["faceit_anticheat", "cs2"] {
+            assert_eq!(
+                registry.validate(
+                    ActionPlan::single(Action::LaunchApplication {
+                        application_id: target.to_owned(),
+                    }),
+                    request(&profile),
+                    &profile,
+                ),
+                Err(ValidationError::PreMatchTargetRequiresHandoff(
+                    target.to_owned()
+                ))
+            );
+        }
+        assert!(registry
+            .validate(
+                ActionPlan::single(Action::LaunchApplication {
+                    application_id: "discord".to_owned(),
+                }),
+                request(&profile),
+                &profile,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn fixed_handoff_cannot_be_mixed_with_other_actions() {
+        let registry =
+            ActionRegistry::new(["faceit_anticheat", "chrome", "cs2", "discord"], ["cs2"]);
+        let profile = ProfileController::new();
+        let plan = ActionPlan {
+            schema_version: ACTION_PLAN_SCHEMA_VERSION,
+            actions: vec![
+                Action::StartCompetitiveHandoff,
+                Action::LaunchApplication {
+                    application_id: "discord".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(
+            registry.validate(plan, request(&profile), &profile),
+            Err(ValidationError::HandoffMustBeStandalone)
         );
     }
 }
