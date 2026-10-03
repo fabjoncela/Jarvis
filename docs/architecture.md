@@ -19,7 +19,7 @@ The current implementation validates the complete source-controlled
 configuration bundle before it constructs the router or registry. The explicit
 `--monitor-competitive` process is the sole resident policy owner for the
 current Windows account. It owns an opaque reviewed Win32 Job Object and a fixed
-manifest for the checked-in session worker. A same-user local named pipe with a
+manifest for the checked-in session and model-worker shells. A same-user local named pipe with a
 strict fixed-command protocol carries status, the fixed confirmed pre-match
 handoff, Discord launch, and the worker containment self-check. Its DACL is owner-only, remote
 clients are rejected, one pipe instance is exclusive, and peers must resolve
@@ -27,14 +27,16 @@ to the same Jarvis executable image. Action and worker-start requests are
 serialized on the owner; supported clients fail closed when it is absent. The
 stdin validation loop and other validation-only CLI commands remain
 process-local and do not claim machine-wide protection. There is no installed
-Windows service, automatic startup, or OS event subscription. The worker
+Windows service or automatic startup. The worker
 containment self-check creates the fixed worker suspended, assigns and verifies
 its Job Object membership, then resumes it. The check accepts neither a user
 path nor a PID. The one session worker can receive only its manager-created
 cooperative exit event; the manager observes its exact process handle, bounds
 cooperative exit, verifies Job Object emptiness after any forced fallback, and
-allows a restart only from an empty Job Object. General multi-worker lifecycle
-management and additional worker types are not implemented.
+allows a restart only from an empty Job Object. The fixed model-worker shell
+also passes a contained start/stop/restart test, but it loads no model and has
+no request channel or user-facing start path. Inference and general worker
+management are not implemented.
 
 The opt-in activity monitor reconciles state immediately at startup and takes
 authoritative read-only process/service snapshots every 500 ms. When the fixed
@@ -155,6 +157,13 @@ feedback, and trusted machine observations. Dispatch or positive feedback
 alone cannot produce a verified machine outcome. Its native observation
 constructor is intentionally private until a reviewed observer exists; this
 is a contract foundation, not a live result verifier.
+
+`jarvis-model-protocol` parses at most 4,096 bytes of strict versioned JSON
+from an untrusted future local model. It admits only no-action, fixed
+Discord/Chrome launch IDs, or bounded master volume, and returns no execution
+authority by itself. Its admission API rechecks the live profile generation
+and action registry; every eventual side effect still needs a fresh supervisor
+gate check. There is no model runtime or model-driven execution path yet.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.
