@@ -71,7 +71,6 @@ cargo build
 cargo run -p jarvis -- --self-check
 cargo run -p jarvis -- --competitive-self-check
 cargo run -p jarvis -- --detection-self-check
-cargo run -p jarvis -- --model-worker-self-check
 cargo run -p jarvis -- --pre-match-setup-self-check
 cargo run -p jarvis -- --route "Jarvis, open Discord"
 cargo run -p jarvis -- --serve-stdin
@@ -97,6 +96,8 @@ second monitor cannot claim the same endpoint. If the resident process exits,
 clients cannot claim that protection is active. Run clients from the same
 binary path as the monitor; an isolated build and `cargo run` from the default
 target are different identities and cannot talk to each other.
+Once that monitor is running, the same-image client can run
+`cargo run -p jarvis -- --model-worker-self-check` while God Mode is healthy.
 
 For opt-in timing diagnostics, start the monitor with
 `--monitor-competitive --diagnostics`; it reports monotonic reconciliation
