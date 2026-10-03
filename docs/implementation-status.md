@@ -161,6 +161,12 @@ pre-match launch sequence, not a running desktop assistant:
     without a profile change. It does not start a model, dispatch an action,
     or bypass the resident supervisor's live generation/profile and
     registry checks.
+    The supervisor now prepares an ephemeral model request only for an unknown
+    deterministic route while both God Mode gates are open. Known commands and
+    invalid patterns cannot fall through to it. Only one pending request is
+    retained; response admission is one-shot and validation-only. Competitive
+    entry cancels it before owned-worker shutdown. No request is sent to a
+    model yet.
 26. A second fixed `jarvis-model-worker.exe` identity is in the worker
     manifest and FFI allowlist. The binary currently only waits for its
     manager-created cooperative shutdown event; it loads no model and has no

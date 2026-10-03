@@ -156,12 +156,14 @@ dependencies = [
  "jarvis-config",
  "jarvis-core",
  "jarvis-gaming",
+ "jarvis-model-protocol",
  "jarvis-profiles",
  "jarvis-router",
  "jarvis-session-context",
  "jarvis-storage",
  "jarvis-verification",
  "jarvis-windows",
+ "serde_json",
 ]
 
 [[package]]

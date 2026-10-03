@@ -167,6 +167,10 @@ authority by itself. Its admission API rechecks the live profile generation
 and action registry, and rejects canceled or 30-second-expired pending
 requests; every eventual side effect still needs a fresh supervisor
 gate check. There is no model runtime or model-driven execution path yet.
+The supervisor prepares this envelope only for unknown deterministic routes
+while both God Mode gates are open; invalid patterns and known routes never
+fall through. It holds one pending request without retaining the utterance,
+consumes response admission once, and cancels the request on Competitive entry.
 
 V2 embeddings and inferred routines, and V3 generated code/build sandboxing,
 are intentionally absent until the V1 safety and lifecycle tests pass.

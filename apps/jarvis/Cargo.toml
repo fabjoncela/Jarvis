@@ -10,6 +10,7 @@ jarvis-actions = { path = "../../crates/jarvis-actions" }
 jarvis-config = { path = "../../crates/jarvis-config" }
 jarvis-core = { path = "../../crates/jarvis-core" }
 jarvis-gaming = { path = "../../crates/jarvis-gaming" }
+jarvis-model-protocol = { path = "../../crates/jarvis-model-protocol" }
 jarvis-profiles = { path = "../../crates/jarvis-profiles" }
 jarvis-router = { path = "../../crates/jarvis-router" }
 jarvis-session-context = { path = "../../crates/jarvis-session-context" }
@@ -19,6 +20,7 @@ jarvis-windows = { path = "../../crates/jarvis-windows" }
 
 [dev-dependencies]
 jarvis-storage = { path = "../../crates/jarvis-storage", features = ["test-util"] }
+serde_json = "1.0"
 
 [lints]
 workspace = true

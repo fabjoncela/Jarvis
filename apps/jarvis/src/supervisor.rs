@@ -13,6 +13,10 @@ use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, Validati
 use jarvis_config::{ConfigError, FaceitSetupStatus, ValidatedConfiguration};
 use jarvis_core::{ProfileGeneration, RequestContext, RequestId};
 use jarvis_gaming::{ensure_cs2_not_running, TriggerObservation, WindowsCs2ProcessSource};
+use jarvis_model_protocol::{
+    admit_model_proposal, encode_planning_request, AdmissionError, ModelAdmission,
+    PendingModelRequest, RequestError,
+};
 use jarvis_profiles::{
     GateError, Profile, ProfileController, RestoreError, ShutdownVerification, TransitionCause,
     TransitionStart, TransitionState,
@@ -333,6 +337,20 @@ pub enum RouteOutcome {
     Unknown,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelRequestError {
+    ProfileGate(GateError),
+    KnownDeterministicRoute,
+    InvalidDeterministicPattern,
+    Protocol(RequestError),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ModelResponseError {
+    NoPendingRequest,
+    Admission(AdmissionError),
+}
+
 /// The one authoritative mutable owner for a future long-lived Jarvis process.
 ///
 /// All request admission takes `&mut self`, keeping policy and monitor
@@ -349,6 +367,7 @@ pub struct Supervisor {
     last_handoff_attempt: Option<LastHandoffAttempt>,
     last_discord_execution: Option<DiscordExecution>,
     session_context: SessionContext,
+    pending_model_request: Option<PendingModelRequest>,
 }
 
 impl Supervisor {
@@ -379,6 +398,7 @@ impl Supervisor {
             last_handoff_attempt: None,
             last_discord_execution: None,
             session_context: SessionContext::new(ProfileGeneration::initial()),
+            pending_model_request: None,
         })
     }
 
@@ -512,6 +532,54 @@ impl Supervisor {
             RouteResult::InvalidPattern { reason } => Ok(RouteOutcome::InvalidPattern(reason)),
             RouteResult::Unknown => Ok(RouteOutcome::Unknown),
         }
+    }
+
+    /// Prepares, but does not send, one bounded request for a future owned
+    /// local model worker. Deterministic commands and malformed patterns never
+    /// fall through to the model. No utterance is retained by the supervisor.
+    #[allow(dead_code)]
+    pub fn begin_model_request(&mut self, command: &str) -> Result<Vec<u8>, ModelRequestError> {
+        match self.router.route(command) {
+            RouteResult::Plan(_) => return Err(ModelRequestError::KnownDeterministicRoute),
+            RouteResult::InvalidPattern { .. } => {
+                return Err(ModelRequestError::InvalidDeterministicPattern);
+            }
+            RouteResult::Unknown => {}
+        }
+        let request = RequestContext::new(RequestId::next(), self.controller.generation());
+        self.controller
+            .authorize_action(request)
+            .map_err(ModelRequestError::ProfileGate)?;
+        self.controller
+            .authorize_worker_start(request)
+            .map_err(ModelRequestError::ProfileGate)?;
+        let encoded =
+            encode_planning_request(command, request).map_err(ModelRequestError::Protocol)?;
+        if let Some(previous) = self.pending_model_request.take() {
+            previous.cancel();
+        }
+        self.pending_model_request = Some(PendingModelRequest::new(request, Instant::now()));
+        Ok(encoded)
+    }
+
+    /// One-shot validation only. No operating-system effect is dispatched.
+    #[allow(dead_code)]
+    pub fn admit_model_response(
+        &mut self,
+        response: &[u8],
+    ) -> Result<ModelAdmission, ModelResponseError> {
+        let pending = self
+            .pending_model_request
+            .take()
+            .ok_or(ModelResponseError::NoPendingRequest)?;
+        admit_model_proposal(
+            response,
+            &pending,
+            Instant::now(),
+            &self.registry,
+            &self.controller,
+        )
+        .map_err(ModelResponseError::Admission)
     }
 
     /// Executes the one fixed pre-match handoff only after the caller collected
@@ -809,6 +877,9 @@ impl Supervisor {
     ) -> Result<CompetitiveEntryResult, CompetitiveEntryError> {
         self.healthy_clear_since = None;
         let start = self.controller.enter_competitive(cause);
+        if let Some(pending) = self.pending_model_request.take() {
+            pending.cancel();
+        }
         self.session_context.clear();
         if let Some(execution) = self.last_discord_execution.as_mut() {
             execution
@@ -1116,6 +1187,66 @@ mod tests {
             supervisor.route("Jarvis, open Discord"),
             Ok(RouteOutcome::Validated(_))
         ));
+    }
+
+    #[test]
+    fn model_fallback_is_only_prepared_for_unknown_text_and_is_one_shot() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        assert_eq!(
+            supervisor.begin_model_request("open discord"),
+            Err(ModelRequestError::KnownDeterministicRoute)
+        );
+        assert_eq!(
+            supervisor.begin_model_request("set volume to 101"),
+            Err(ModelRequestError::InvalidDeterministicPattern)
+        );
+        let encoded = supervisor.begin_model_request("what can you do?").unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(request["utterance"], "what can you do?");
+        let reply = serde_json::json!({
+            "schema_version": 1,
+            "request_id": request["request_id"],
+            "profile_generation": request["profile_generation"],
+            "action": {"type": "no_action"}
+        });
+        let reply = serde_json::to_vec(&reply).unwrap();
+        assert_eq!(
+            supervisor.admit_model_response(&reply),
+            Ok(ModelAdmission::NoAction)
+        );
+        assert_eq!(
+            supervisor.admit_model_response(&reply),
+            Err(ModelResponseError::NoPendingRequest)
+        );
+    }
+
+    #[test]
+    fn competitive_entry_cancels_pending_model_response_without_loading_worker() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let encoded = supervisor.begin_model_request("unknown command").unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let reply = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "request_id": request["request_id"],
+            "profile_generation": request["profile_generation"],
+            "action": {"type": "launch_application", "application_id": "discord"}
+        }))
+        .unwrap();
+        supervisor
+            .enter_competitive(TransitionCause::Cs2Process)
+            .unwrap();
+        assert_eq!(
+            supervisor.admit_model_response(&reply),
+            Err(ModelResponseError::NoPendingRequest)
+        );
+        assert!(matches!(
+            supervisor.begin_model_request("another unknown command"),
+            Err(ModelRequestError::ProfileGate(_))
+        ));
+        assert_eq!(
+            supervisor.status().unwrap().active_owned_worker_processes,
+            0
+        );
     }
 
     #[test]
