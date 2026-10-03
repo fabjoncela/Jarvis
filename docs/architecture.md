@@ -158,7 +158,9 @@ alone cannot produce a verified machine outcome. Its native observation
 constructor is intentionally private until a reviewed observer exists; this
 is a contract foundation, not a live result verifier.
 
-`jarvis-model-protocol` parses at most 4,096 bytes of strict versioned JSON
+`jarvis-model-protocol` sends one bounded 1,024-byte utterance with an exact
+request/profile-generation anchor and a fixed capability list. It parses at
+most 4,096 bytes of strict versioned JSON with the matching anchor
 from an untrusted future local model. It admits only no-action, fixed
 Discord/Chrome launch IDs, or bounded master volume, and returns no execution
 authority by itself. Its admission API rechecks the live profile generation

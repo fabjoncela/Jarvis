@@ -3,14 +3,27 @@
 Status: inventory and implementation gate, not an active model integration.
 Observed on this Windows workstation on 3 October 2026; recheck before use.
 
-The workspace now includes `jarvis-model-protocol`, a parser for bounded,
-versioned, untrusted model responses. It returns inert candidates for only
+The workspace now includes `jarvis-model-protocol`, a bounded request encoder
+and parser for versioned, untrusted model responses. Replies must echo the
+exact request ID and profile generation. It returns inert candidates for only
 Discord/Chrome launch, master volume, or no action. Schema and negative policy
 tests pass; there is still no inference runtime or model-driven execution.
 The fixed model-worker binary is now present as a lifecycle-only shell; it
 waits for the owned manager's shutdown event and cannot perform inference.
 Its start/stop/restart containment test passes on this PC, but model loading,
 request/response IPC, timeout, crash, and child-process cases remain open.
+
+The future response must be one complete JSON value, for example:
+
+```json
+{"schema_version":1,"request_id":42,"profile_generation":0,"action":{"type":"launch_application","application_id":"discord"}}
+```
+
+The request ID and generation are examples, not reusable values. The worker
+must echo the actual values from the bounded request; a mismatch is denied.
+The capability list advertises only `launch_application:discord`,
+`launch_application:chrome`, and `set_master_volume`. `no_action` is also
+valid. This schema does not grant execution authority.
 
 ## Existing local assets
 

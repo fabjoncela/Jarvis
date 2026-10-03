@@ -153,7 +153,10 @@ pre-match launch sequence, not a running desktop assistant:
     an inert, request-anchored candidate. Its 4,096-byte, strict versioned JSON
     schema accepts only no-action, fixed Discord/Chrome launch IDs, or bounded
     master volume. Unknown targets, additional fields, broad actions, partial
-    JSON, and trailing output fail closed. It does not start a model, dispatch
+    JSON, trailing output, and mismatched request/profile-generation echoes
+    fail closed. It also encodes one ephemeral utterance of at most 1,024 bytes
+    with a fixed capability list and no stored context. Its admission function
+    rechecks the live Rust profile and action registry. It does not start a model, dispatch
     an action, or bypass the resident supervisor's live generation/profile and
     registry checks.
 26. A second fixed `jarvis-model-worker.exe` identity is in the worker
