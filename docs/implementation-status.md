@@ -5,6 +5,11 @@
 The workspace provides a validation foundation and one explicit, confirmed
 pre-match launch sequence, not a running desktop assistant:
 
+The dormant model fallback gate also rejects protected gaming topics, including
+separator variants of FACEIT, Anti-Cheat, and CS2 and requests naming Steam or
+Counter-Strike. This is a conservative routing rule, not an anti-cheat
+compatibility claim; no model inference or model-proposed action is running.
+
 1. `jarvis-core` creates request IDs, profile generations, and cancellation
    tokens.
 2. `apps/jarvis::Supervisor` is the sole mutable owner of configuration,

@@ -377,6 +377,28 @@ pub struct Supervisor {
     pending_model_request: Option<PendingModelRequest>,
 }
 
+/// Model fallback cannot own the fixed competitive launch workflow. Fold
+/// separators as well as case so variants such as "Face-it" and "anti cheat"
+/// do not escape the gate. This is deliberately conservative; the action
+/// registry independently rejects protected launch targets.
+fn is_protected_model_topic(command: &str) -> bool {
+    let folded: String = command
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+    [
+        "faceit",
+        "anticheat",
+        "cs2",
+        "csgo",
+        "counterstrike",
+        "steam",
+    ]
+    .iter()
+    .any(|marker| folded.contains(marker))
+}
+
 impl Supervisor {
     pub fn bootstrap(configuration_directory: &Path) -> Result<Self, SupervisorError> {
         let configuration = ValidatedConfiguration::load_from_dir(configuration_directory)
@@ -553,15 +575,7 @@ impl Supervisor {
             }
             RouteResult::Unknown => {}
         }
-        if command
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .any(|token| {
-                matches!(
-                    token.to_ascii_lowercase().as_str(),
-                    "faceit" | "cs2" | "anticheat"
-                )
-            })
-        {
+        if is_protected_model_topic(command) {
             return Err(ModelRequestError::ProtectedTopicRequiresExplicitWorkflow);
         }
         let request = RequestContext::new(RequestId::next(), self.controller.generation());
@@ -1234,7 +1248,16 @@ mod tests {
             supervisor.begin_model_request("set volume to 101"),
             Err(ModelRequestError::InvalidDeterministicPattern)
         );
-        for protected in ["open faceit", "visit faceit.com", "start CS2 again"] {
+        for protected in [
+            "open faceit",
+            "visit faceit.com",
+            "start CS2 again",
+            "start Face-it AC",
+            "open anti cheat",
+            "launch C S 2",
+            "play Counter-Strike",
+            "Steam app 730",
+        ] {
             assert_eq!(
                 supervisor.begin_model_request(protected),
                 Err(ModelRequestError::ProtectedTopicRequiresExplicitWorkflow)
