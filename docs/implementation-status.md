@@ -200,6 +200,12 @@ compatibility claim; no model inference or model-proposed action is running.
     deny both worker identities before path resolution in Competitive Mode.
     A separate test confirms the shell immediately exits with an error when
     launched without its manager-created shutdown signal.
+    Those two native lifecycle integration tests are now opt-in/ignored in
+    default workspace runs and require a fresh healthy idle competitive
+    snapshot before a manual run. During development on 3 October, a default
+    package test briefly started the inert shell while FACEITService was
+    active and no resident monitor was running; it exited cleanly, no worker
+    remained, and the tests were changed to prevent a default repeat.
     The resident-only `--model-worker-self-check` now runs two fixed shell
     cycles through the authoritative owner. Its first live run returned two
     distinct process IDs, left no model-worker process, and preserved healthy

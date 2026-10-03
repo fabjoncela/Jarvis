@@ -1,10 +1,27 @@
 use std::path::Path;
 use std::process::Command;
 
+use jarvis_gaming::{DetectionHealth, FailClosedTriggerDetector, WindowsCompetitiveActivitySource};
 use jarvis_windows::{InternalWorker, WindowsWorkerManager};
 
+fn require_healthy_idle_competitive_snapshot() {
+    let mut detector = FailClosedTriggerDetector::new(WindowsCompetitiveActivitySource::new());
+    let observation = detector.observe();
+    assert_eq!(
+        observation.health,
+        DetectionHealth::Healthy,
+        "worker lifecycle diagnostics require healthy competitive observation"
+    );
+    assert!(
+        !observation.snapshot.any_automatic_trigger_active(),
+        "worker lifecycle diagnostics cannot run while CS2 or FACEIT is active"
+    );
+}
+
 #[test]
+#[ignore = "manual native lifecycle diagnostic; use only after verified healthy idle precheck"]
 fn fixed_model_shell_starts_in_owned_job_and_exits_cooperatively() {
+    require_healthy_idle_competitive_snapshot();
     let executable = Path::new(env!("CARGO_BIN_EXE_jarvis-model-worker"));
     let installation_directory = executable.parent().expect("binary parent directory");
     let mut manager = WindowsWorkerManager::create().expect("create owned Job Object");
@@ -23,7 +40,9 @@ fn fixed_model_shell_starts_in_owned_job_and_exits_cooperatively() {
 }
 
 #[test]
+#[ignore = "manual native lifecycle diagnostic; use only after verified healthy idle precheck"]
 fn model_shell_refuses_to_run_without_manager_shutdown_signal() {
+    require_healthy_idle_competitive_snapshot();
     let executable = Path::new(env!("CARGO_BIN_EXE_jarvis-model-worker"));
     let result = Command::new(executable)
         .output()
