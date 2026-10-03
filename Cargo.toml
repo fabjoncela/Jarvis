@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/jarvis-session-context",
+    "crates/jarvis-model-protocol",
     "crates/jarvis-verification",
     "apps/jarvis",
     "apps/session-worker",

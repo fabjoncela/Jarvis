@@ -1,0 +1,18 @@
+[package]
+name = "jarvis-model-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jarvis-actions = { path = "../jarvis-actions" }
+jarvis-core = { path = "../jarvis-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+jarvis-profiles = { path = "../jarvis-profiles" }
+
+[lints]
+workspace = true

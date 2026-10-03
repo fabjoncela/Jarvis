@@ -3,6 +3,11 @@
 Status: inventory and implementation gate, not an active model integration.
 Observed on this Windows workstation on 3 October 2026; recheck before use.
 
+The workspace now includes `jarvis-model-protocol`, a parser for bounded,
+versioned, untrusted model responses. It returns inert candidates for only
+Discord/Chrome launch, master volume, or no action. Schema and negative policy
+tests pass; there is still no model runtime, worker, or model-driven execution.
+
 ## Existing local assets
 
 - Ollama 0.32.5 is installed, but it was not running before this inventory.
@@ -55,6 +60,6 @@ Observed on this Windows workstation on 3 October 2026; recheck before use.
 - No cloud fallback, automatic model download, persistent server, or default
   transcript retention.
 
-The current Jarvis checkout has none of this inference worker yet. The
-existing deterministic commands and fixed launch paths remain the only
-runtime execution paths.
+The current Jarvis checkout has no inference worker yet. The existing
+deterministic commands and fixed launch paths remain the only runtime
+execution paths.

@@ -149,6 +149,13 @@ pre-match launch sequence, not a running desktop assistant:
     tests cover Competitive denial and stale request rejection. The new
     Chrome command was smoke-tested through the resident monitor on this PC;
     it does not replace the confirmed FACEIT pre-match handoff.
+25. `jarvis-model-protocol` now parses an untrusted local-model response into
+    an inert, request-anchored candidate. Its 4,096-byte, strict versioned JSON
+    schema accepts only no-action, fixed Discord/Chrome launch IDs, or bounded
+    master volume. Unknown targets, additional fields, broad actions, partial
+    JSON, and trailing output fail closed. It does not start a model, dispatch
+    an action, or bypass the resident supervisor's live generation/profile and
+    registry checks.
 
 ## Fixed Chrome launch smoke result (3 October 2026)
 
@@ -186,7 +193,7 @@ changed. The `--set-volume` write path remains untested on the live endpoint.
   fixed Discord/Chrome commands can currently launch user applications, while the
   one bounded volume action affects the default output endpoint
 - general-purpose memory/feedback commands or a learning pipeline, general-purpose IPC, tray
-  UI, microphone, STT, TTS, Qwen, or learning workers
+  UI, microphone, STT, TTS, Qwen inference, or learning workers
 
 ## Measurement result (2 October 2026)
 
