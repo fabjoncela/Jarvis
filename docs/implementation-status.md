@@ -163,10 +163,15 @@ pre-match launch sequence, not a running desktop assistant:
     manifest and FFI allowlist. The binary currently only waits for its
     manager-created cooperative shutdown event; it loads no model and has no
     request channel. The worker manager can contain it in the owned Job
-    Object, but no user-facing model-start or model-execution path is enabled.
+    Object, but no user-facing model-loading or model-execution path is enabled.
     A native integration test started and cooperatively stopped the fixed
     shell twice, verified owned Job Object emptiness, and the supervisor tests
     deny both worker identities before path resolution in Competitive Mode.
+    The resident-only `--model-worker-self-check` now runs two fixed shell
+    cycles through the authoritative owner. Its first live run returned two
+    distinct process IDs, left no model-worker process, and preserved healthy
+    idle God Mode. This diagnostic still loads no Qwen model or inference
+    runtime.
 
 ## Fixed Chrome launch smoke result (3 October 2026)
 
@@ -184,11 +189,18 @@ service was launched by this Chrome command.
 The new fixed worker shell passed a native contained start, cooperative stop,
 empty-Job verification, and restart test. The workspace test, clippy, and
 build checks passed. The resident monitor was replaced with the matching
-`target\debug\jarvis.exe` (PID 12080 at deployment) only after its old owner
+`target\debug\jarvis.exe` (PID 12080 at that deployment) only after its old owner
 reported healthy stable God Mode with CS2, FACEIT Anti-Cheat Launcher, and
 `FACEITService` inactive. The new owner reported the same state. No model was
 loaded, no game or FACEIT component was touched, and there is no user-facing
 model execution path yet.
+
+The later matching `target\v1-model-check\debug\jarvis.exe` was deployed as
+the resident monitor (PID 30440 at deployment) after the same healthy idle
+precheck. It passed `--model-worker-self-check` with two distinct owned PIDs,
+and reported healthy stable God Mode with all fixed triggers inactive before
+and after. No game, FACEIT component, browser, Ollama server, or audio setting
+was changed for this diagnostic.
 
 ## Read-only volume smoke result (3 October 2026)
 

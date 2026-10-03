@@ -12,6 +12,9 @@ The fixed model-worker binary is now present as a lifecycle-only shell; it
 waits for the owned manager's shutdown event and cannot perform inference.
 Its start/stop/restart containment test passes on this PC, but model loading,
 request/response IPC, timeout, crash, and child-process cases remain open.
+The resident supervisor's explicit `--model-worker-self-check` also passed
+two cooperative cycles on 3 October 2026 while the fixed competitive triggers
+were inactive. It is a lifecycle diagnostic, not inference.
 
 The future response must be one complete JSON value, for example:
 
