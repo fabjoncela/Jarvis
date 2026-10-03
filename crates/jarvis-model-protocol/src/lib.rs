@@ -8,6 +8,7 @@ use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, Validati
 use jarvis_core::{CancellationToken, RequestContext};
 use jarvis_profiles::ProfileController;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -99,11 +100,22 @@ struct IncomingPlanningRequest {
     allowed_actions: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DecodedPlanningRequest {
     request_id: u64,
     profile_generation: u64,
     utterance: String,
+}
+
+impl fmt::Debug for DecodedPlanningRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecodedPlanningRequest")
+            .field("request_id", &self.request_id)
+            .field("profile_generation", &self.profile_generation)
+            .field("utterance_bytes", &self.utterance.len())
+            .finish()
+    }
 }
 
 impl DecodedPlanningRequest {
@@ -472,6 +484,7 @@ mod tests {
         assert_eq!(decoded.request_id(), request.request_id.value());
         assert_eq!(decoded.profile_generation(), request.generation.value());
         assert_eq!(decoded.utterance(), "unknown task");
+        assert!(!format!("{decoded:?}").contains("unknown task"));
         let response = encode_no_action_response(&decoded);
         assert_eq!(
             parse_model_proposal(&response, request),
