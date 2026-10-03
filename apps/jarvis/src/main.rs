@@ -154,7 +154,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "fixed internal worker manifest: {} entries; shell starts available only through --worker-self-check and --model-worker-self-check",
+        "fixed internal worker manifest: {} entries; shell starts available only through --worker-self-check, --model-worker-self-check, and --combined-worker-self-check",
         status.configured_internal_worker_count
     )
     .map_err(io_error)?;
