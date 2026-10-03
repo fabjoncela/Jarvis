@@ -185,6 +185,8 @@ pre-match launch sequence, not a running desktop assistant:
     A native integration test started and cooperatively stopped the fixed
     shell twice, verified owned Job Object emptiness, and the supervisor tests
     deny both worker identities before path resolution in Competitive Mode.
+    A separate test confirms the shell immediately exits with an error when
+    launched without its manager-created shutdown signal.
     The resident-only `--model-worker-self-check` now runs two fixed shell
     cycles through the authoritative owner. Its first live run returned two
     distinct process IDs, left no model-worker process, and preserved healthy

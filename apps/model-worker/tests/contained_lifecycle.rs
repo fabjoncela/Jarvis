@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 
 use jarvis_windows::{InternalWorker, WindowsWorkerManager};
 
@@ -19,4 +20,14 @@ fn fixed_model_shell_starts_in_owned_job_and_exits_cooperatively() {
         assert!(report.all_workers_exited_successfully);
         assert_eq!(manager.active_process_count().expect("query empty job"), 0);
     }
+}
+
+#[test]
+fn model_shell_refuses_to_run_without_manager_shutdown_signal() {
+    let executable = Path::new(env!("CARGO_BIN_EXE_jarvis-model-worker"));
+    let result = Command::new(executable)
+        .output()
+        .expect("run unowned shell only to verify immediate denial");
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("shutdown signal"));
 }
