@@ -16,7 +16,7 @@ members = [
     "crates/jarvis-windows",
     "crates/jarvis-windows-ffi",
 ]
-default-members = ["apps/jarvis", "apps/session-worker"]
+default-members = ["apps/jarvis", "apps/session-worker", "apps/model-worker"]
 resolver = "2"
 
 [workspace.package]

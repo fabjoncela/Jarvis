@@ -54,6 +54,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
     match arguments.as_slice() {
         [flag] if flag == "--prepare-faceit-cs2" => return prepare_faceit_cs2(),
         [flag] if flag == "--worker-self-check" => return worker_self_check_client(),
+        [flag] if flag == "--model-worker-self-check" => return model_worker_self_check_client(),
         [flag] if flag == "--supervisor-status" => return supervisor_status(false),
         [flag] if flag == "--last-handoff" => return last_handoff(),
         [flag] if flag == "--open-discord" => return open_discord(),
@@ -101,7 +102,7 @@ fn run(arguments: Vec<String>, configuration_directory: &Path) -> Result<(), Str
             lifecycle_notification_self_check()
         }
         _ => Err(
-            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --open-chrome | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --feedback-last-discord <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
+            "usage: jarvis [--self-check | --route <command> | --execute <command> | --serve-stdin | --worker-self-check | --model-worker-self-check | --competitive-self-check | --detection-self-check | --monitor-competitive [--diagnostics] | --supervisor-status [--diagnostics] | --last-handoff | --open-discord | --open-chrome | --discord-status | --volume-status | --set-volume <0..100> | --feedback-discord <reference> <worked|failed> | --feedback-last-discord <worked|failed> | --pre-match-setup-self-check | --lifecycle-notification-self-check | --prepare-faceit-cs2 | --remember-preferred-app <chrome|discord> | --show-preferred-app | --clear-preferred-app]"
                 .to_owned(),
         ),
     }
@@ -130,7 +131,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "fixed-worker lifecycle: available only through --worker-self-check; general multi-worker lifecycle: not implemented"
+        "fixed-worker lifecycle: session/model shell self-checks only; inference and general multi-worker lifecycle: not implemented"
     )
     .map_err(io_error)?;
     writeln!(output, "supervisor policy state: {:?}", status.profile).map_err(io_error)?;
@@ -150,7 +151,7 @@ fn write_self_check<W: Write>(supervisor: &Supervisor, output: &mut W) -> Result
     .map_err(io_error)?;
     writeln!(
         output,
-        "fixed internal worker manifest: {} entries; session start available only through --worker-self-check; model start not enabled",
+        "fixed internal worker manifest: {} entries; shell starts available only through --worker-self-check and --model-worker-self-check",
         status.configured_internal_worker_count
     )
     .map_err(io_error)?;
@@ -266,13 +267,27 @@ fn io_error(error: io::Error) -> String {
 }
 
 fn worker_self_check_client() -> Result<(), String> {
-    let response = send_supervisor_control_request(SupervisorControlCommand::WorkerSelfCheck)
-        .map_err(|error| {
-            format!(
-                "authoritative supervisor unavailable; start --monitor-competitive first ({error})"
-            )
-        })?;
-    if response.starts_with("OK WORKER_SELF_CHECK") {
+    worker_self_check_request(
+        SupervisorControlCommand::WorkerSelfCheck,
+        "WORKER_SELF_CHECK",
+    )
+}
+
+fn model_worker_self_check_client() -> Result<(), String> {
+    worker_self_check_request(
+        SupervisorControlCommand::ModelWorkerSelfCheck,
+        "MODEL_WORKER_SELF_CHECK",
+    )
+}
+
+fn worker_self_check_request(
+    command: SupervisorControlCommand,
+    response_kind: &str,
+) -> Result<(), String> {
+    let response = send_supervisor_control_request(command).map_err(|error| {
+        format!("authoritative supervisor unavailable; start --monitor-competitive first ({error})")
+    })?;
+    if response.starts_with(&format!("OK {response_kind} ")) {
         println!("Jarvis authoritative worker containment self-check");
         println!("{response}");
         println!("worker start and shutdown were serialized by the resident policy owner");
@@ -287,9 +302,10 @@ fn worker_self_check_client() -> Result<(), String> {
 fn checked_worker_cycle(
     supervisor: &mut Supervisor,
     installation_directory: &Path,
+    worker: InternalWorker,
 ) -> Result<jarvis_windows::WorkerProcessIdentity, String> {
     let identity = supervisor
-        .start_internal_worker(InternalWorker::Session, installation_directory)
+        .start_internal_worker(worker, installation_directory)
         .map_err(|error| format!("worker self-check failed: {error}"))?;
     let shutdown = supervisor
         .shutdown_internal_workers()
@@ -868,17 +884,28 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 after.health,
             ))
         }
-        SupervisorControlCommand::WorkerSelfCheck => {
+        SupervisorControlCommand::WorkerSelfCheck
+        | SupervisorControlCommand::ModelWorkerSelfCheck => {
             if !status.worker_start_gate_open {
                 return Ok("ERR POLICY".to_owned());
             }
+            let worker = if command == SupervisorControlCommand::WorkerSelfCheck {
+                InternalWorker::Session
+            } else {
+                InternalWorker::Model
+            };
+            let response_kind = if worker == InternalWorker::Session {
+                "WORKER_SELF_CHECK"
+            } else {
+                "MODEL_WORKER_SELF_CHECK"
+            };
             let executable = env::current_exe().map_err(|error| error.to_string())?;
             let installation_directory = executable.parent().ok_or_else(|| {
                 "could not determine the supervisor executable directory".to_owned()
             })?;
-            let worker_check = checked_worker_cycle(supervisor, installation_directory).and_then(
+            let worker_check = checked_worker_cycle(supervisor, installation_directory, worker).and_then(
                 |first| {
-                    let second = checked_worker_cycle(supervisor, installation_directory)?;
+                    let second = checked_worker_cycle(supervisor, installation_directory, worker)?;
                     if first == second {
                         return Err("worker restart retained a stale process identity".to_owned());
                     }
@@ -889,7 +916,7 @@ fn handle_control_request<S: jarvis_gaming::TriggerSnapshotSource>(
                 Ok((first, second)) => {
                     let _ = monitor_cycle(supervisor, detector, last_report)?;
                     Ok(format!(
-                        "OK WORKER_SELF_CHECK FIRST_PID={} SECOND_PID={}",
+                        "OK {response_kind} FIRST_PID={} SECOND_PID={}",
                         first.process_id(),
                         second.process_id(),
                     ))
@@ -1599,6 +1626,31 @@ mod tests {
 
     fn test_config_directory() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
+    }
+
+    #[test]
+    fn competitive_mode_denies_model_shell_self_check_before_path_access() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        supervisor
+            .enter_competitive(TransitionCause::Manual)
+            .unwrap();
+        let mut detector = FailClosedTriggerDetector::new(SequenceSnapshotSource(VecDeque::from(
+            [Ok(TriggerSnapshot::default())],
+        )));
+        let mut last_report = None;
+        assert_eq!(
+            handle_control_request(
+                SupervisorControlCommand::ModelWorkerSelfCheck,
+                &mut supervisor,
+                &mut detector,
+                &mut last_report,
+            ),
+            Ok("ERR POLICY".to_owned())
+        );
+        assert_eq!(
+            supervisor.status().unwrap().active_owned_worker_processes,
+            0
+        );
     }
 
     #[test]
