@@ -179,6 +179,7 @@ pub enum WorkerKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalWorker {
     Session,
+    Model,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,11 +212,18 @@ impl WorkerSpec {
 pub struct WorkerManifest;
 
 impl WorkerManifest {
-    const WORKERS: [WorkerSpec; 1] = [WorkerSpec {
-        id: "session",
-        kind: WorkerKind::Session,
-        executable_name: "jarvis-session-worker.exe",
-    }];
+    const WORKERS: [WorkerSpec; 2] = [
+        WorkerSpec {
+            id: "session",
+            kind: WorkerKind::Session,
+            executable_name: "jarvis-session-worker.exe",
+        },
+        WorkerSpec {
+            id: "model",
+            kind: WorkerKind::Llm,
+            executable_name: "jarvis-model-worker.exe",
+        },
+    ];
 
     #[must_use]
     pub const fn all(&self) -> &'static [WorkerSpec] {
@@ -226,6 +234,7 @@ impl WorkerManifest {
     pub const fn specification(&self, worker: InternalWorker) -> WorkerSpec {
         match worker {
             InternalWorker::Session => Self::WORKERS[0],
+            InternalWorker::Model => Self::WORKERS[1],
         }
     }
 }
@@ -346,6 +355,7 @@ impl WindowsOwnedWorkerJob {
     ) -> Result<RunningInternalWorker, WorkerLaunchError> {
         let worker = match worker {
             InternalWorker::Session => FixedInternalWorker::Session,
+            InternalWorker::Model => FixedInternalWorker::Model,
         };
         let suspended = self
             .job
@@ -629,9 +639,9 @@ mod tests {
     }
 
     #[test]
-    fn manifest_allows_only_the_checked_in_session_worker() {
+    fn manifest_allows_only_checked_in_workers() {
         let manifest = WorkerManifest;
-        assert_eq!(manifest.all().len(), 1);
+        assert_eq!(manifest.all().len(), 2);
         assert_eq!(
             manifest
                 .specification(InternalWorker::Session)
@@ -645,6 +655,20 @@ mod tests {
                 kind: WorkerKind::Session,
                 executable_name: "jarvis-session-worker.exe",
             }
+        );
+        assert_eq!(
+            manifest.specification(InternalWorker::Model),
+            WorkerSpec {
+                id: "model",
+                kind: WorkerKind::Llm,
+                executable_name: "jarvis-model-worker.exe",
+            }
+        );
+        assert_eq!(
+            manifest
+                .specification(InternalWorker::Model)
+                .executable_name(),
+            FixedInternalWorker::Model.executable_name()
         );
     }
 

@@ -5,6 +5,7 @@ members = [
     "crates/jarvis-verification",
     "apps/jarvis",
     "apps/session-worker",
+    "apps/model-worker",
     "crates/jarvis-actions",
     "crates/jarvis-config",
     "crates/jarvis-core",

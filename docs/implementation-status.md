@@ -30,7 +30,7 @@ pre-match launch sequence, not a running desktop assistant:
    worker's fixed named exit event before resume, observes the exact process
    handle and exit code, and never accepts a general IPC payload.
 8. `jarvis-windows` retains the in-memory adapter for policy tests, owns the
-   fixed one-entry internal-worker manifest, and provides an opaque worker
+   fixed two-entry internal-worker manifest, and provides an opaque worker
    manager. It sends only the fixed cooperative-exit signal, waits a bounded
    500 ms, falls back to terminating only its Job Object, verifies emptiness,
    and permits restart only after that verified empty state. It exposes no API
@@ -156,6 +156,14 @@ pre-match launch sequence, not a running desktop assistant:
     JSON, and trailing output fail closed. It does not start a model, dispatch
     an action, or bypass the resident supervisor's live generation/profile and
     registry checks.
+26. A second fixed `jarvis-model-worker.exe` identity is in the worker
+    manifest and FFI allowlist. The binary currently only waits for its
+    manager-created cooperative shutdown event; it loads no model and has no
+    request channel. The worker manager can contain it in the owned Job
+    Object, but no user-facing model-start or model-execution path is enabled.
+    A native integration test started and cooperatively stopped the fixed
+    shell twice, verified owned Job Object emptiness, and the supervisor tests
+    deny both worker identities before path resolution in Competitive Mode.
 
 ## Fixed Chrome launch smoke result (3 October 2026)
 

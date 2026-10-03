@@ -4,8 +4,9 @@
 //! The supervisor must validate every returned plan against its live profile,
 //! generation, and action registry before any side effect.
 
-use jarvis_actions::{Action, ActionPlan};
+use jarvis_actions::{Action, ActionPlan, ActionRegistry, ValidatedPlan, ValidationError};
 use jarvis_core::RequestContext;
+use jarvis_profiles::ProfileController;
 use serde::Deserialize;
 
 pub const MODEL_PROPOSAL_SCHEMA_VERSION: u16 = 1;
@@ -27,6 +28,18 @@ pub enum ProposalError {
     Malformed,
     UnsupportedSchemaVersion,
     InvalidVolume,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum AdmissionError {
+    Protocol(ProposalError),
+    Policy(ValidationError),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ModelAdmission {
+    NoAction,
+    Validated(ValidatedPlan),
 }
 
 #[derive(Deserialize)]
@@ -86,6 +99,28 @@ pub fn parse_model_proposal(
         request,
         plan: ActionPlan::single(action),
     })
+}
+
+/// Admit an untrusted response only through the live Rust policy owner.
+/// A caller must still reauthorize immediately before every later effect.
+pub fn admit_model_proposal(
+    response: &[u8],
+    request: RequestContext,
+    registry: &ActionRegistry,
+    profile: &ProfileController,
+) -> Result<ModelAdmission, AdmissionError> {
+    // Even an abstention is not accepted across a profile generation change.
+    profile
+        .authorize_action(request)
+        .map_err(ValidationError::ProfileGate)
+        .map_err(AdmissionError::Policy)?;
+    match parse_model_proposal(response, request).map_err(AdmissionError::Protocol)? {
+        ModelProposal::NoAction => Ok(ModelAdmission::NoAction),
+        ModelProposal::Candidate { request, plan } => registry
+            .validate(plan, request, profile)
+            .map(ModelAdmission::Validated)
+            .map_err(AdmissionError::Policy),
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +230,46 @@ mod tests {
         assert!(matches!(
             registry.validate(plan, request(&profile), &profile),
             Err(ValidationError::ProfileGate(_))
+        ));
+    }
+
+    #[test]
+    fn admission_applies_live_policy_to_model_output_and_abstention() {
+        let registry = ActionRegistry::new(["discord"], ["cs2"]);
+        let mut profile = ProfileController::new();
+        let stale_request = request(&profile);
+        let candidate =
+            br#"{"schema_version":1,"action":{"type":"launch_application","application_id":"chrome"}}"#;
+        assert_eq!(
+            admit_model_proposal(candidate, stale_request, &registry, &profile),
+            Err(AdmissionError::Policy(
+                ValidationError::UnregisteredApplication("chrome".to_owned())
+            ))
+        );
+        assert_eq!(
+            admit_model_proposal(
+                br#"{"schema_version":1,"action":{"type":"no_action"}}"#,
+                stale_request,
+                &registry,
+                &profile,
+            ),
+            Ok(ModelAdmission::NoAction)
+        );
+        profile.enter_competitive(TransitionCause::Cs2Process);
+        assert_eq!(
+            admit_model_proposal(candidate, stale_request, &registry, &profile),
+            Err(AdmissionError::Policy(ValidationError::ProfileGate(
+                GateError::StaleGeneration
+            )))
+        );
+        assert!(matches!(
+            admit_model_proposal(
+                br#"{"schema_version":1,"action":{"type":"no_action"}}"#,
+                request(&profile),
+                &registry,
+                &profile,
+            ),
+            Err(AdmissionError::Policy(ValidationError::ProfileGate(_)))
         ));
     }
 }

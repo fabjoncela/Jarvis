@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(status.profile, Profile::GodMode);
         assert_eq!(status.transition, TransitionState::Stable);
         assert_eq!(status.active_owned_worker_processes, 0);
-        assert_eq!(status.configured_internal_worker_count, 1);
+        assert_eq!(status.configured_internal_worker_count, 2);
     }
 
     #[test]
@@ -1381,10 +1381,12 @@ mod tests {
             .controller
             .enter_competitive(jarvis_profiles::TransitionCause::Manual);
 
-        assert!(matches!(
-            supervisor.start_internal_worker(InternalWorker::Session, Path::new("does-not-exist")),
-            Err(WorkerStartError::ProfileGate(GateError::ProfileRestricted))
-        ));
+        for worker in [InternalWorker::Session, InternalWorker::Model] {
+            assert!(matches!(
+                supervisor.start_internal_worker(worker, Path::new("does-not-exist")),
+                Err(WorkerStartError::ProfileGate(GateError::ProfileRestricted))
+            ));
+        }
     }
 
     #[test]
@@ -1405,10 +1407,12 @@ mod tests {
         assert_eq!(status.transition, TransitionState::Stable);
         assert!(!status.action_gate_open);
         assert!(!status.worker_start_gate_open);
-        assert!(matches!(
-            supervisor.start_internal_worker(InternalWorker::Session, Path::new("does-not-exist")),
-            Err(WorkerStartError::ProfileGate(GateError::ProfileRestricted))
-        ));
+        for worker in [InternalWorker::Session, InternalWorker::Model] {
+            assert!(matches!(
+                supervisor.start_internal_worker(worker, Path::new("does-not-exist")),
+                Err(WorkerStartError::ProfileGate(GateError::ProfileRestricted))
+            ));
+        }
     }
 
     #[test]

@@ -204,6 +204,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jarvis-model-worker"
+version = "0.1.0"
+dependencies = [
+ "jarvis-windows",
+ "jarvis-windows-ffi",
+]
+
+[[package]]
 name = "jarvis-profiles"
 version = "0.1.0"
 dependencies = [

@@ -109,6 +109,7 @@ impl Error for Win32Error {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixedInternalWorker {
     Session,
+    Model,
 }
 
 /// The only external process identity this FFI boundary observes during the
@@ -1159,6 +1160,7 @@ impl FixedInternalWorker {
     pub const fn executable_name(self) -> &'static str {
         match self {
             Self::Session => "jarvis-session-worker.exe",
+            Self::Model => "jarvis-model-worker.exe",
         }
     }
 }
