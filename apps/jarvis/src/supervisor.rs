@@ -1366,6 +1366,37 @@ mod tests {
     }
 
     #[test]
+    fn competitive_entry_invalidates_queued_and_dequeued_model_work() {
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let (sender, receiver) = jarvis_model_protocol::model_request_mailbox();
+        supervisor
+            .queue_model_request("unknown task", &sender)
+            .unwrap();
+        let taken = receiver.try_receive(Instant::now()).unwrap().unwrap();
+        assert_eq!(taken.check_live(Instant::now()), Ok(()));
+        supervisor
+            .enter_competitive(TransitionCause::Cs2Process)
+            .unwrap();
+        assert_eq!(
+            taken.check_live(Instant::now()),
+            Err(RequestMailboxError::Cancelled)
+        );
+
+        let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
+        let (sender, receiver) = jarvis_model_protocol::model_request_mailbox();
+        supervisor
+            .queue_model_request("unknown task", &sender)
+            .unwrap();
+        supervisor
+            .enter_competitive(TransitionCause::FaceitProcess)
+            .unwrap();
+        assert!(matches!(
+            receiver.try_receive(Instant::now()),
+            Err(RequestMailboxError::Cancelled)
+        ));
+    }
+
+    #[test]
     fn mailbox_poll_is_nonblocking_and_rejects_reply_after_competitive_entry() {
         let mut supervisor = Supervisor::bootstrap(&test_config_directory()).unwrap();
         let (sender, receiver) = jarvis_model_protocol::model_reply_mailbox();
